@@ -4,7 +4,7 @@ use crate::{
     playback::{FrameQueue, PlaybackState, ReadThread, VideoThread, packet_queue},
 };
 use ffmpeg_sys_next as ff;
-use std::{ptr::NonNull, sync::Arc, thread::JoinHandle};
+use std::{ptr::NonNull, sync::Arc, thread::JoinHandle, time::Duration};
 
 pub struct Video {
     adapter: wgpu::Adapter,
@@ -84,6 +84,7 @@ impl Video {
         frame: NonNull<ff::AVFrame>,
         queued_len: usize,
         retry: &mut bool,
+        wait_duration: &mut Duration,
     ) -> bool {
         let frame_ref = unsafe { frame.as_ref() };
 
@@ -106,6 +107,8 @@ impl Video {
 
         let delay = duration; // TODO: we need to add A/V sync latency here
 
+        *wait_duration = Duration::from_secs_f64((self.frame_timer + delay - time).max(0.0));
+
         if time < self.frame_timer + delay {
             // too early
             *retry = true;
@@ -116,6 +119,9 @@ impl Video {
         if delay > 0.0 && time - self.frame_timer > 0.1 {
             self.frame_timer = time;
         }
+
+        *wait_duration = Duration::from_secs_f64((self.frame_timer + delay - time).max(0.0));
+
         /*if queued_len > 0 {
             *retry = true;
             return true;
@@ -135,9 +141,9 @@ impl Video {
         true
     }
 
-    pub fn update(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn update(&mut self, encoder: &mut wgpu::CommandEncoder) -> Duration {
         if self.pbs.paused() || self.frame_queue.queued_len() == 0 {
-            return;
+            return Duration::from_millis(32);
         }
 
         // TODO: we should maintain our own frame queue here
@@ -145,6 +151,9 @@ impl Video {
         // if we receive a frame and decide we don't want to show it yet (e.g., based on pts)
         // then we can re-queue it for later
 
+        let mut duration = Duration::from_secs_f64(
+            self.query_info.framerate.den as f64 / self.query_info.framerate.num as f64,
+        );
         loop {
             let queued_len = self.frame_queue.queued_len();
             let frame = self
@@ -153,7 +162,7 @@ impl Video {
                 .or_else(|| self.frame_queue.try_next());
             if let Some(frame) = frame {
                 let mut retry = false;
-                let pop = self.update_frame(encoder, frame, queued_len, &mut retry);
+                let pop = self.update_frame(encoder, frame, queued_len, &mut retry, &mut duration);
                 if !pop {
                     self.queued_frame = Some(frame);
                 } else {
@@ -166,6 +175,7 @@ impl Video {
                 break;
             }
         }
+        duration
     }
 }
 

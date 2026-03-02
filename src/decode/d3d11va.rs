@@ -361,7 +361,7 @@ impl ImportedTexture {
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(mapped.RowPitch),
-                        rows_per_image: Some(y_texture.height() / 2),
+                        rows_per_image: Some(uv_texture.height()),
                     },
                     wgpu::Extent3d {
                         width: uv_texture.width(),

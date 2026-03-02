@@ -40,5 +40,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var rgb = clamp(yuv * yuv2rgb, vec3<f32>(0), vec3<f32>(1));
 
-    return pow(vec4<f32>(rgb, 1), vec4<f32>(2.2));
+    return vec4<f32>(rgb, 1);
 }

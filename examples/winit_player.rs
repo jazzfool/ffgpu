@@ -15,7 +15,6 @@ fn main() {
     let window = Arc::new(window);
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::DX12,
         flags: wgpu::InstanceFlags::advanced_debugging(),
         ..wgpu::InstanceDescriptor::from_env_or_default()
     });
@@ -105,7 +104,10 @@ fn main() {
     surface.configure(&device, &config);
 
     let video_texture = video.texture().clone();
-    let video_view = video_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let video_view = video_texture.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+        ..Default::default()
+    });
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
@@ -141,7 +143,7 @@ fn main() {
 
                     let mut encoder = device.create_command_encoder(&Default::default());
 
-                    video.update(&mut encoder);
+                    let wait = video.update(&mut encoder);
                     {
                         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: None,
@@ -166,10 +168,12 @@ fn main() {
                     queue.submit(Some(encoder.finish()));
                     window.pre_present_notify();
                     frame.present();
+
+                    std::thread::sleep(wait);
+                    window.request_redraw();
                 }
                 _ => {}
             },
-            Event::AboutToWait => window.request_redraw(),
             _ => {}
         })
         .unwrap();
