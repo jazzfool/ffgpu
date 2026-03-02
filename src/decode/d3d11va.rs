@@ -469,10 +469,11 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                     .unwrap();
             }
 
+            imported_texture.on_copy(queue, &self.d3d11_device);
+
             // unlock ffmpeg mutex
             ((*self.d3d11_ctx).unlock)((*self.d3d11_ctx).lock_ctx);
 
-            imported_texture.on_copy(queue, &self.d3d11_device);
             Some(&imported_texture.bg0)
         }
     }
