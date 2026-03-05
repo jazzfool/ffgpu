@@ -10,7 +10,7 @@ Supported platforms:
 |--------------------------|------------|----------|-----------|------------|
 | **Windows (D3D11VA)**    | Yes        | Yes      | N/A       | CPU        |
 | **MacOS (VideoToolbox)** | CPU        | N/A      | Yes       | CPU        |
-| **Linux (VA-API DRM)**   | WIP        | N/A      | N/A       | CPU        |
+| **Linux (VA-API DRM)**   | Yes        | N/A      | N/A       | CPU        |
 
 I have no plans to support zero-copy on the OpenGL backend on any platform (but PRs for this are welcome of course).
 The same goes for web and mobile platforms (Android and iOS).
