@@ -24,4 +24,4 @@ metal = "0.33"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ash = "0.38"
-nix = "0.31"
+libc = "0.2"

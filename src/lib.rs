@@ -18,3 +18,8 @@ pub fn required_wgpu_device_features(adapter: &wgpu::Adapter) -> wgpu::Features 
 pub fn required_wgpu_device_features(_adapter: &wgpu::Adapter) -> wgpu::Features {
     wgpu::Features::empty()
 }
+
+#[cfg(target_os = "linux")]
+pub fn required_wgpu_device_features(_adapter: &wgpu::Adapter) -> wgpu::Features {
+    wgpu::Features::empty()
+}
