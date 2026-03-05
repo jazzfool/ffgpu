@@ -1,5 +1,6 @@
 #[cfg(target_os = "windows")]
 mod d3d11va;
+#[cfg(target_os = "linux")]
 mod vaapi;
 #[cfg(target_os = "macos")]
 mod video_toolbox;
@@ -22,9 +23,11 @@ pub(crate) trait HardwareDecoder {
     unsafe fn import_frame(
         &mut self,
         frame: NonNull<ff::AVFrame>,
+        instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
     ) -> Option<&wgpu::BindGroup>;
 }
@@ -35,6 +38,9 @@ pub(crate) const fn av_version(major: u8, minor: u8, rev: u8) -> u32 {
 
 #[cfg(target_os = "windows")]
 type NativeDecoder = d3d11va::D3D11VAHardwareDecoder;
+
+#[cfg(target_os = "linux")]
+type NativeDecoder = vaapi::VAAPIHardwareDecoder;
 
 #[cfg(target_os = "macos")]
 type NativeDecoder = video_toolbox::VideoToolboxHardwareDecoder;
@@ -106,6 +112,7 @@ impl FrameDecoder {
 
     pub unsafe fn decode_native_frame(
         &mut self,
+        instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -113,8 +120,15 @@ impl FrameDecoder {
         frame: NonNull<ff::AVFrame>,
     ) {
         let bg0 = unsafe {
-            self.hwdec
-                .import_frame(frame, adapter, device, queue, &self.bg0_layout)
+            self.hwdec.import_frame(
+                frame,
+                instance,
+                adapter,
+                device,
+                queue,
+                encoder,
+                &self.bg0_layout,
+            )
         };
         let Some(bg0) = bg0 else { return };
 

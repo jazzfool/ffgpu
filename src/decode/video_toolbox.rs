@@ -350,9 +350,11 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
     unsafe fn import_frame(
         &mut self,
         mut frame: NonNull<ff::AVFrame>,
+        _instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        _encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
     ) -> Option<&wgpu::BindGroup> {
         unsafe {

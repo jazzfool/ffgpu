@@ -7,6 +7,7 @@ use ffmpeg_sys_next as ff;
 use std::{ptr::NonNull, sync::Arc, thread::JoinHandle, time::Duration};
 
 pub struct Video {
+    instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -25,6 +26,7 @@ pub struct Video {
 
 impl Video {
     pub(crate) fn new(
+        instance: wgpu::Instance,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -57,6 +59,7 @@ impl Video {
         .run();
 
         Video {
+            instance,
             adapter,
             device,
             queue,
@@ -130,6 +133,7 @@ impl Video {
         self.last_pts = frame_ref.best_effort_timestamp;
         unsafe {
             self.frame_decoder.decode_native_frame(
+                &self.instance,
                 &self.adapter,
                 &self.device,
                 &self.queue,

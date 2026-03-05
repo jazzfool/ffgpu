@@ -33,7 +33,7 @@ fn main() {
     }))
     .unwrap();
 
-    let mut context = Context::new(&adapter, &device, &queue);
+    let mut context = Context::new(&instance, &adapter, &device, &queue);
     let mut video = context.create_video();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
