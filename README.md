@@ -1,6 +1,6 @@
 # ffgpu
 
-a small experiment to bridge libavcodec/FFmpeg to WGPU for zero (CPU) copy GPU-accelerated video decoding.
+A small experiment to bridge libavcodec/FFmpeg to WGPU for zero (CPU) copy GPU-accelerated video decoding.
 
 The primary goal of this library is to bring simple and fast video playback to WGPU-based applications.
 
@@ -23,3 +23,7 @@ This library is very incomplete and the following features are missing/WIP (roug
 - Subtitle decoding (including from a separate file)
 - Software decoding fallback
 - Fast thumbnailing; directly downsampled to an RGB texture atlas array from the YUV texture.
+
+Full zero-copy (including GPU copies) is currently unachievable due to upstream limitations. To name a couple:
+- ffmpeg <=8.0 does not expose the ability to modify the texture usage flags on the D3D11VA decoder (in this case, `SHARED`). This has already been fixed in ffmpeg trunk but is unreleased.
+- wgpu does not have any way to (and does not by opportunity) request `VK_EXT_image_drm_format_modifier`. As such, dma buffers given by FFmpeg must be imported and copied to a `VkImage`. Mesa drivers also do not support `VK_EXT_image_drm_format_modifier` on certain graphics cards.

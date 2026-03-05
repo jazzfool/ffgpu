@@ -1,5 +1,6 @@
 #[cfg(target_os = "windows")]
 mod d3d11va;
+mod vaapi;
 #[cfg(target_os = "macos")]
 mod video_toolbox;
 

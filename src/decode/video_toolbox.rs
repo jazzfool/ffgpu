@@ -361,6 +361,12 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                 return None;
             }
 
+            assert_eq!(
+                frame.format,
+                ff::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX as i32,
+                "unexpected frame AVPixelFormat, expected VideoToolbox frame"
+            );
+
             let pixel_buffer = NonNull::new_unchecked(frame.data[3] as *mut cv::CVPixelBuffer);
 
             let imported_texture =

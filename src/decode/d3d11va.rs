@@ -1,6 +1,5 @@
-use crate::{context::pipeline_cache::PipelineCache, decode::av_version};
-
 use super::HardwareDecoder;
+use crate::{context::pipeline_cache::PipelineCache, decode::av_version};
 use ffmpeg_sys_next as ff;
 use std::{ffi::c_void, ptr::NonNull};
 use windows::{
@@ -412,6 +411,12 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
             if frame.data[0].is_null() {
                 return None;
             }
+
+            assert_eq!(
+                frame.format,
+                ff::AVPixelFormat::AV_PIX_FMT_D3D11 as i32,
+                "unexpected frame AVPixelFormat, expected D3D11 frame"
+            );
 
             let d3d11_texture: D3D11::ID3D11Texture2D = core::mem::transmute(frame.data[0]);
 

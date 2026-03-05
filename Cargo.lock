@@ -577,6 +577,7 @@ dependencies = [
 name = "ffgpu"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "crossbeam-channel",
  "env_logger",
  "ffmpeg-sys-next",
