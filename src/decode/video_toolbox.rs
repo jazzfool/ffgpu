@@ -2,7 +2,7 @@ use crate::{
     context::pipeline_cache::PipelineCache,
     decode::{HardwareDecoder, av_version},
 };
-use ffmpeg_sys_next as ff;
+use ffmpeg_next::sys as ff;
 use metal::foreign_types::ForeignType;
 use objc2_core_video as cv;
 use std::ptr::{NonNull, null_mut};
@@ -338,10 +338,8 @@ pub struct VideoToolboxHardwareDecoder {
 
 impl HardwareDecoder for VideoToolboxHardwareDecoder {
     const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
-    const AVUTIL_VERSION: std::ops::RangeInclusive<u32> =
-        av_version(55, 78, 100)..=av_version(60, 25, 100);
 
-    unsafe fn new(_hwctx: *mut ff::AVBufferRef) -> Self {
+    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Self {
         VideoToolboxHardwareDecoder {
             imported_texture: None,
         }

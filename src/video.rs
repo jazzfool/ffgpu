@@ -1,10 +1,16 @@
 use crate::{
     context::pipeline_cache::PipelineCache,
     decode::{Decoder, FrameDecoder, QueryInfo},
+    error::Result,
     playback::{FrameQueue, PlaybackState, ReadThread, VideoThread, packet_queue},
 };
-use ffmpeg_sys_next as ff;
-use std::{ptr::NonNull, sync::Arc, thread::JoinHandle, time::Duration};
+use ffmpeg_next::{self as ffn, sys as ff};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+    thread::JoinHandle,
+    time::Duration,
+};
 
 pub struct Video {
     instance: wgpu::Instance,
@@ -21,21 +27,25 @@ pub struct Video {
     query_info: QueryInfo,
     frame_timer: f64,
     last_pts: i64,
-    queued_frame: Option<NonNull<ff::AVFrame>>,
+    queued_frame: Option<ffn::Frame>,
 }
 
 impl Video {
-    pub(crate) fn new(
+    pub(crate) fn new<P>(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
         pipeline_cache: &mut PipelineCache,
-    ) -> Self {
-        let (stream_decoder, frame_decoder) = unsafe { Decoder::new(&device, pipeline_cache) };
-        let stream_decoder = Arc::new(stream_decoder);
+        path: &P,
+    ) -> Result<Self>
+    where
+        P: AsRef<Path> + ?Sized,
+    {
+        let (stream_decoder, frame_decoder) = Decoder::new(&device, pipeline_cache, path)?;
+        let query_info = stream_decoder.query_info;
 
-        let query_info = unsafe { stream_decoder.query_info() };
+        let stream_decoder = Arc::new(Mutex::new(stream_decoder));
 
         let pbs = Arc::new(PlaybackState::new());
 
@@ -58,7 +68,7 @@ impl Video {
         )
         .run();
 
-        Video {
+        Ok(Video {
             instance,
             adapter,
             device,
@@ -74,7 +84,7 @@ impl Video {
             frame_timer: 0.0,
             last_pts: 0,
             queued_frame: None,
-        }
+        })
     }
 
     pub fn texture(&self) -> &wgpu::Texture {
@@ -84,23 +94,20 @@ impl Video {
     fn update_frame(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        frame: NonNull<ff::AVFrame>,
-        queued_len: usize,
+        frame: &ffn::Frame,
+        _queued_len: usize,
         retry: &mut bool,
         wait_duration: &mut Duration,
     ) -> bool {
-        let frame_ref = unsafe { frame.as_ref() };
-
         let time = unsafe { ff::av_gettime_relative() as f64 / 1000000.0 };
 
-        let duration = (frame_ref.best_effort_timestamp as f64
-            * self.query_info.time_base.num as f64
-            / self.query_info.time_base.den as f64)
-            - (self.last_pts as f64 * self.query_info.time_base.num as f64
-                / self.query_info.time_base.den as f64);
+        let best_effort_timestamp = unsafe { (*frame.as_ptr()).best_effort_timestamp };
+
+        let duration = (best_effort_timestamp as f64 * f64::from(self.query_info.time_base))
+            - (self.last_pts as f64 * f64::from(self.query_info.time_base));
         let duration = if duration < 0.0 || duration > 3600.0 {
-            if self.query_info.framerate.num > 0 && self.query_info.framerate.den > 0 {
-                self.query_info.framerate.den as f64 / self.query_info.framerate.num as f64
+            if self.query_info.framerate.0 > 0 && self.query_info.framerate.1 > 0 {
+                f64::from(self.query_info.framerate.invert())
             } else {
                 0.0
             }
@@ -130,7 +137,7 @@ impl Video {
             return true;
         }*/
 
-        self.last_pts = frame_ref.best_effort_timestamp;
+        self.last_pts = best_effort_timestamp;
         unsafe {
             self.frame_decoder.decode_native_frame(
                 &self.instance,
@@ -155,9 +162,7 @@ impl Video {
         // if we receive a frame and decide we don't want to show it yet (e.g., based on pts)
         // then we can re-queue it for later
 
-        let mut duration = Duration::from_secs_f64(
-            self.query_info.framerate.den as f64 / self.query_info.framerate.num as f64,
-        );
+        let mut duration = Duration::from_secs_f64(f64::from(self.query_info.framerate.invert()));
         loop {
             let queued_len = self.frame_queue.queued_len();
             let frame = self
@@ -166,7 +171,7 @@ impl Video {
                 .or_else(|| self.frame_queue.try_next());
             if let Some(frame) = frame {
                 let mut retry = false;
-                let pop = self.update_frame(encoder, frame, queued_len, &mut retry, &mut duration);
+                let pop = self.update_frame(encoder, &frame, queued_len, &mut retry, &mut duration);
                 if !pop {
                     self.queued_frame = Some(frame);
                 } else {
@@ -186,10 +191,6 @@ impl Video {
 impl Drop for Video {
     fn drop(&mut self) {
         self.pbs.kill();
-
-        if let Some(frame) = self.queued_frame {
-            self.frame_queue.release(frame);
-        }
 
         if let Some(video_thread) = self.video_thread.take() {
             video_thread.join().unwrap();

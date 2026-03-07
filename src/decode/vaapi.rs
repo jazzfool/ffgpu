@@ -1,7 +1,7 @@
 use super::{HardwareDecoder, av_version};
 use crate::context::pipeline_cache::PipelineCache;
 use ash::vk;
-use ffmpeg_sys_next as ff;
+use ffmpeg_next::sys as ff;
 use std::ptr::{NonNull, null_mut};
 
 struct VulkanDRMTexture {
@@ -427,10 +427,8 @@ pub struct VAAPIHardwareDecoder {
 
 impl HardwareDecoder for VAAPIHardwareDecoder {
     const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI;
-    const AVUTIL_VERSION: std::ops::RangeInclusive<u32> =
-        av_version(55, 78, 100)..=av_version(60, 25, 100);
 
-    unsafe fn new(_hwctx: *mut ff::AVBufferRef) -> Self {
+    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Self {
         VAAPIHardwareDecoder { imported: None }
     }
 

@@ -580,7 +580,7 @@ dependencies = [
  "ash",
  "crossbeam-channel",
  "env_logger",
- "ffmpeg-sys-next",
+ "ffmpeg-next",
  "libc",
  "log",
  "metal",
@@ -592,6 +592,17 @@ dependencies = [
  "wgpu",
  "windows",
  "winit",
+]
+
+[[package]]
+name = "ffmpeg-next"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d658424d233cbd993a972dd73a66ca733acd12a494c68995c9ac32ae1fe65b40"
+dependencies = [
+ "bitflags 2.11.0",
+ "ffmpeg-sys-next",
+ "libc",
 ]
 
 [[package]]

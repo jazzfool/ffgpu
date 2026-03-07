@@ -1,5 +1,6 @@
 pub mod context;
 pub mod decode;
+pub mod error;
 pub mod playback;
 pub mod video;
 

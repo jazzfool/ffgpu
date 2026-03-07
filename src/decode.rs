@@ -5,21 +5,21 @@ mod vaapi;
 #[cfg(target_os = "macos")]
 mod video_toolbox;
 
-use ffmpeg_sys_next as ff;
-use std::{
-    ffi::CString,
-    ops::RangeInclusive,
-    pin::Pin,
-    ptr::{NonNull, null, null_mut},
+use crate::{
+    context::pipeline_cache::PipelineCache,
+    error::{Error, Result},
 };
-
-use crate::context::pipeline_cache::PipelineCache;
+use ffmpeg_next::{self as ffn, sys as ff};
+use std::{
+    path::Path,
+    pin::Pin,
+    ptr::{NonNull, null_mut},
+};
 
 pub(crate) trait HardwareDecoder {
     const DEVICE_TYPE: ff::AVHWDeviceType;
-    const AVUTIL_VERSION: RangeInclusive<u32>;
 
-    unsafe fn new(hwctx: *mut ff::AVBufferRef) -> Self;
+    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Self;
     unsafe fn import_frame(
         &mut self,
         frame: NonNull<ff::AVFrame>,
@@ -30,10 +30,6 @@ pub(crate) trait HardwareDecoder {
         encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
     ) -> Option<&wgpu::BindGroup>;
-}
-
-pub(crate) const fn av_version(major: u8, minor: u8, rev: u8) -> u32 {
-    (rev as u32) | ((minor as u32) << 8) | ((major as u32) << 16)
 }
 
 #[cfg(target_os = "windows")]
@@ -72,11 +68,11 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
-    unsafe fn new(
-        hwctx: *mut ff::AVBufferRef,
+    fn new(
+        hwctx: NonNull<ff::AVBufferRef>,
         device: &wgpu::Device,
         pipeline_cache: &mut PipelineCache,
-        color_space: ff::AVColorSpace,
+        color_space: ffn::color::Space,
         width: u32,
         height: u32,
     ) -> Self {
@@ -117,11 +113,11 @@ impl FrameDecoder {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        frame: NonNull<ff::AVFrame>,
+        frame: &ffn::Frame,
     ) {
         let bg0 = unsafe {
             self.hwdec.import_frame(
-                frame,
+                NonNull::new_unchecked(frame.as_ptr() as *mut _),
                 instance,
                 adapter,
                 device,
@@ -158,9 +154,10 @@ impl FrameDecoder {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct QueryInfo {
-    pub time_base: ff::AVRational,
-    pub framerate: ff::AVRational,
+    pub time_base: ffn::Rational,
+    pub framerate: ffn::Rational,
     pub width: u32,
     pub height: u32,
 }
@@ -170,132 +167,118 @@ struct DecoderData {
 }
 
 pub(crate) struct Decoder {
-    pub format_ctx: *mut ff::AVFormatContext,
-    pub decoder_ctx: *mut ff::AVCodecContext,
-    pub hwctx: *mut ff::AVBufferRef,
-    pub video_stream: *mut ff::AVStream,
-    pub video_stream_idx: i32,
+    pub format_ctx: ffn::format::context::Input,
+    pub decoder_ctx: ffn::decoder::Video,
+    pub hwctx: NonNull<ff::AVBufferRef>,
+    pub video_stream_index: usize,
+    pub query_info: QueryInfo,
     _decoder_data: Pin<Box<DecoderData>>,
 }
 
 impl Decoder {
-    pub unsafe fn new(
+    pub fn new<P>(
         device: &wgpu::Device,
         pipeline_cache: &mut PipelineCache,
-    ) -> (Self, FrameDecoder) {
-        unsafe {
-            assert!(
-                NativeDecoder::AVUTIL_VERSION.contains(&ff::avutil_version()),
-                "unsupported ffmpeg version"
-            );
+        path: &P,
+    ) -> Result<(Self, FrameDecoder)>
+    where
+        P: AsRef<Path> + ?Sized,
+    {
+        ffn::init()?;
 
-            ff::avdevice_register_all();
+        let format_ctx = ffn::format::input(path)?;
 
-            let mut format_ctx = ff::avformat_alloc_context();
-            ff::avformat_open_input(
-                &mut format_ctx,
-                CString::new("test.mp4").unwrap().as_ptr(),
-                null_mut(),
-                null_mut(),
-            );
-            ff::avformat_find_stream_info(format_ctx, null_mut());
+        let video_stream = format_ctx
+            .streams()
+            .best(ffn::media::Type::Video)
+            .ok_or(Error::InvalidStream)?;
 
-            let mut decoder = null();
-            let video_stream_idx = ff::av_find_best_stream(
-                format_ctx,
-                ff::AVMediaType::AVMEDIA_TYPE_VIDEO,
-                -1,
-                -1,
-                &mut decoder,
-                0,
-            );
+        let video_stream_index = video_stream.index();
 
-            let mut hw_pixel_format = ff::AVPixelFormat::AV_PIX_FMT_NONE;
-            for i in 0..16 {
-                let config = ff::avcodec_get_hw_config(decoder, i);
-                if config.is_null() {
-                    panic!("unsupported decoder");
-                }
-                if ((*config).methods & ff::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32) != 0
-                    && (*config).device_type == NativeDecoder::DEVICE_TYPE
-                {
-                    hw_pixel_format = (*config).pix_fmt;
-                    break;
-                }
+        let video_codec = video_stream.parameters().id();
+        let decoder =
+            ffn::decoder::find(video_codec).ok_or(Error::MissingCodec(video_codec.name()))?;
+
+        let mut hw_pixel_format = ff::AVPixelFormat::AV_PIX_FMT_NONE;
+        for i in 0..16 {
+            let config = unsafe {
+                ff::avcodec_get_hw_config(decoder.as_ptr(), i)
+                    .as_ref()
+                    .ok_or(Error::MissingCodec(video_codec.name()))?
+            };
+            if (config.methods & ff::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32) != 0
+                && config.device_type == NativeDecoder::DEVICE_TYPE
+            {
+                hw_pixel_format = config.pix_fmt;
+                break;
             }
+        }
 
-            let decoder_ctx = ff::avcodec_alloc_context3(decoder);
+        let mut decoder_ctx = ffn::codec::Context::new_with_codec(decoder).decoder();
+        decoder_ctx.set_parameters(video_stream.parameters())?;
 
-            let video_stream = *(*format_ctx).streams.add(video_stream_idx as _);
-            ff::avcodec_parameters_to_context(decoder_ctx, (*video_stream).codecpar);
+        let mut decoder_data = Box::pin(DecoderData { hw_pixel_format });
+        unsafe {
+            (*decoder_ctx.as_mut_ptr()).opaque = (&mut *decoder_data) as *mut _ as _;
+            (*decoder_ctx.as_mut_ptr()).get_format = Some(get_hw_format);
+        };
 
-            let width = (*(*video_stream).codecpar).width;
-            let height = (*(*video_stream).codecpar).height;
-            let color_space = (*(*video_stream).codecpar).color_space;
-
-            // TODO: set opaque ptr to data we need to keep in callbacks
-            // (*decoder_ctx).opaque
-
-            let mut decoder_data = Box::pin(DecoderData { hw_pixel_format });
-            (*decoder_ctx).opaque = (&mut *decoder_data) as *mut _ as _;
-            (*decoder_ctx).get_format = Some(get_hw_format);
-
-            let mut hwctx = null_mut();
+        let mut hwctx = null_mut();
+        unsafe {
             ff::av_hwdevice_ctx_create(
                 &mut hwctx,
                 NativeDecoder::DEVICE_TYPE,
                 null_mut(),
                 null_mut(),
                 0,
-            );
-
-            (*decoder_ctx).hw_device_ctx = ff::av_buffer_ref(hwctx);
-
-            ff::avcodec_open2(decoder_ctx, decoder, null_mut());
-
-            let frame_decoder = FrameDecoder::new(
-                hwctx,
-                device,
-                pipeline_cache,
-                color_space,
-                width as _,
-                height as _,
-            );
-
-            (
-                Decoder {
-                    format_ctx,
-                    decoder_ctx,
-                    hwctx,
-                    video_stream,
-                    video_stream_idx,
-                    _decoder_data: decoder_data,
-                },
-                frame_decoder,
             )
-        }
-    }
+        };
 
-    pub unsafe fn query_info(&self) -> QueryInfo {
-        let stream = unsafe { self.video_stream.as_ref().unwrap() };
-        let codecpar = unsafe { stream.codecpar.as_ref().unwrap() };
-        QueryInfo {
-            time_base: stream.time_base,
-            framerate: unsafe {
-                ff::av_guess_frame_rate(self.format_ctx, self.video_stream, null_mut())
-            },
-            width: codecpar.width as _,
-            height: codecpar.height as _,
+        let hwctx = NonNull::new(hwctx).ok_or(Error::HardwareContext)?;
+        unsafe {
+            (*decoder_ctx.as_mut_ptr()).hw_device_ctx = ff::av_buffer_ref(hwctx.as_ptr());
         }
+
+        let decoder_ctx = decoder_ctx.video()?;
+
+        let width = decoder_ctx.width();
+        let height = decoder_ctx.height();
+        let color_space = decoder_ctx.color_space();
+
+        let frame_decoder = FrameDecoder::new(
+            hwctx,
+            device,
+            pipeline_cache,
+            color_space,
+            width as _,
+            height as _,
+        );
+
+        let query_info = QueryInfo {
+            time_base: video_stream.time_base(),
+            framerate: video_stream.avg_frame_rate(),
+            width: width,
+            height: height,
+        };
+
+        Ok((
+            Decoder {
+                format_ctx,
+                decoder_ctx,
+                hwctx,
+                video_stream_index,
+                query_info,
+                _decoder_data: decoder_data,
+            },
+            frame_decoder,
+        ))
     }
 }
 
 impl Drop for Decoder {
     fn drop(&mut self) {
         unsafe {
-            ff::av_buffer_unref(&mut self.hwctx);
-            ff::avcodec_free_context(&mut self.decoder_ctx);
-            ff::avformat_close_input(&mut self.format_ctx);
+            ff::av_buffer_unref(&mut self.hwctx.as_ptr());
         }
     }
 }

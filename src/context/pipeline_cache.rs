@@ -1,14 +1,14 @@
-use ffmpeg_sys_next as ff;
+use ffmpeg_next::{self as ffn, sys as ff};
 use std::{borrow::Cow, collections::BTreeMap};
 
-fn yuv_to_rgb_matrix(color_space: ff::AVColorSpace) -> [f32; 9] {
+fn yuv_to_rgb_matrix(color_space: ffn::color::Space) -> [f32; 9] {
     assert!(
         matches!(
             color_space,
-            ff::AVColorSpace::AVCOL_SPC_BT709
-                | ff::AVColorSpace::AVCOL_SPC_FCC
-                | ff::AVColorSpace::AVCOL_SPC_BT470BG
-                | ff::AVColorSpace::AVCOL_SPC_BT2020_CL
+            ffn::color::Space::BT709
+                | ffn::color::Space::FCC
+                | ffn::color::Space::BT470BG
+                | ffn::color::Space::BT2020CL
         ),
         "unsupported video color space {:#?}",
         color_space
@@ -83,7 +83,7 @@ impl PipelineCache {
         &self.bg0_layout
     }
 
-    pub fn get(&mut self, color_space: ff::AVColorSpace) -> &wgpu::RenderPipeline {
+    pub fn get(&mut self, color_space: ffn::color::Space) -> &wgpu::RenderPipeline {
         self.pipelines.entry(color_space as i32).or_insert_with(|| {
             let color_matrix = yuv_to_rgb_matrix(color_space);
 

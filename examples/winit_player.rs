@@ -1,9 +1,9 @@
 use ffgpu::context::Context;
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{borrow::Cow, sync::Arc};
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::{Window, WindowBuilder, WindowId},
+    event_loop::EventLoop,
+    window::WindowBuilder,
 };
 
 fn main() {
@@ -34,7 +34,7 @@ fn main() {
     .unwrap();
 
     let mut context = Context::new(&instance, &adapter, &device, &queue);
-    let mut video = context.create_video();
+    let mut video = context.create_video("test.mp4").unwrap();
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ffmpeg-sys-next = { version = "8.0" }
+ffmpeg-next = { version = "8.0" }
 thiserror = "2.0"
 wgpu = { version = "28.0", features = ["vulkan-portability"] }
 winit = "0.29"

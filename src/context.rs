@@ -1,7 +1,8 @@
 pub(crate) mod pipeline_cache;
 
-use crate::video::Video;
+use crate::{error::Result, video::Video};
 use pipeline_cache::PipelineCache;
+use std::path::Path;
 
 pub struct Context {
     instance: wgpu::Instance,
@@ -34,13 +35,17 @@ impl Context {
         }
     }
 
-    pub fn create_video(&mut self) -> Video {
+    pub fn create_video<P>(&mut self, path: &P) -> Result<Video>
+    where
+        P: AsRef<Path> + ?Sized,
+    {
         Video::new(
             self.instance.clone(),
             self.adapter.clone(),
             self.device.clone(),
             self.queue.clone(),
             &mut self.pipeline_cache,
+            path,
         )
     }
 }

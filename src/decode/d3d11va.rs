@@ -1,6 +1,6 @@
 use super::HardwareDecoder;
-use crate::{context::pipeline_cache::PipelineCache, decode::av_version};
-use ffmpeg_sys_next as ff;
+use crate::context::pipeline_cache::PipelineCache;
+use ffmpeg_next::sys as ff;
 use std::{ffi::c_void, ptr::NonNull};
 use windows::{
     Win32::{
@@ -381,12 +381,10 @@ pub struct D3D11VAHardwareDecoder {
 
 impl HardwareDecoder for D3D11VAHardwareDecoder {
     const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA;
-    const AVUTIL_VERSION: std::ops::RangeInclusive<u32> =
-        av_version(55, 78, 100)..=av_version(60, 25, 100);
 
-    unsafe fn new(hwctx: *mut ff::AVBufferRef) -> Self {
+    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Self {
         unsafe {
-            let device_ctx = (*hwctx).data as *mut ff::AVHWDeviceContext;
+            let device_ctx = hwctx.as_ref().data as *mut ff::AVHWDeviceContext;
             let d3d11_ctx = (*device_ctx).hwctx as *mut AVD3D11VADeviceContext;
             let d3d11_device: D3D11::ID3D11Device = core::mem::transmute((*d3d11_ctx).device);
 
