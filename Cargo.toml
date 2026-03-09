@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 ffmpeg-next = { version = "8.0" }
 thiserror = "2.0"
-wgpu = { version = "28.0", features = ["vulkan-portability"] }
+wgpu = "28.0"
 winit = "0.29"
 pollster = "0.4"
 env_logger = "0.11"

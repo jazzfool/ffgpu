@@ -1,7 +1,4 @@
-use crate::{
-    context::pipeline_cache::PipelineCache,
-    decode::{HardwareDecoder, av_version},
-};
+use crate::{context::pipeline_cache::PipelineCache, decode::HardwareDecoder};
 use ffmpeg_next::sys as ff;
 use metal::foreign_types::ForeignType;
 use objc2_core_video as cv;
@@ -388,8 +385,8 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                                 pixel_buffer,
                             ))
                         }
-                        _ => {
-                            log::warn!("unsupported zero-copy WGPU backend (must be Metal)");
+                        backend => {
+                            log::warn!("unsupported zero-copy WGPU backend {} (must be Metal)", backend);
                             log::warn!("using CPU frame copies");
                             ImportedTexture::PlanarCopy(CopiedTexture::new(
                                 device,

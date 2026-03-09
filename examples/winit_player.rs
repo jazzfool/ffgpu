@@ -17,7 +17,7 @@ fn main() {
     let window = Arc::new(window);
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        flags: wgpu::InstanceFlags::advanced_debugging(),
+        backends: wgpu::Backends::PRIMARY,
         ..wgpu::InstanceDescriptor::from_env_or_default()
     });
 
