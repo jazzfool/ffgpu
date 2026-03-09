@@ -1,7 +1,7 @@
 use super::HardwareDecoder;
 use crate::context::pipeline_cache::PipelineCache;
 use ffmpeg_next::sys as ff;
-use std::{ffi::c_void, ptr::NonNull};
+use std::{ffi::c_void, mem::ManuallyDrop, ptr::NonNull};
 use windows::{
     Win32::{
         Foundation::HANDLE,
@@ -418,7 +418,8 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                 "unexpected frame AVPixelFormat, expected D3D11 frame"
             );
 
-            let d3d11_texture: D3D11::ID3D11Texture2D = core::mem::transmute(frame.data[0]);
+            let d3d11_texture: ManuallyDrop<D3D11::ID3D11Texture2D> =
+                ManuallyDrop::new(core::mem::transmute(frame.data[0]));
 
             let mut desc = D3D11::D3D11_TEXTURE2D_DESC::default();
             d3d11_texture.GetDesc(&mut desc);
@@ -461,7 +462,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                     0,
                     0,
                     0,
-                    &d3d11_texture,
+                    &*d3d11_texture,
                     frame.data[1] as u32,
                     None,
                 );

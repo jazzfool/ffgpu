@@ -14,6 +14,7 @@ use std::{
     path::Path,
     pin::Pin,
     ptr::{NonNull, null_mut},
+    sync::Mutex,
 };
 
 pub(crate) trait HardwareDecoder {
@@ -167,8 +168,8 @@ struct DecoderData {
 }
 
 pub(crate) struct Decoder {
-    pub format_ctx: ffn::format::context::Input,
-    pub decoder_ctx: ffn::decoder::Video,
+    pub format_ctx: Mutex<ffn::format::context::Input>,
+    pub decoder_ctx: Mutex<ffn::decoder::Video>,
     pub hwctx: NonNull<ff::AVBufferRef>,
     pub video_stream_index: usize,
     pub query_info: QueryInfo,
@@ -216,6 +217,10 @@ impl Decoder {
 
         let mut decoder_ctx = ffn::codec::Context::new_with_codec(decoder).decoder();
         decoder_ctx.set_parameters(video_stream.parameters())?;
+        decoder_ctx.set_threading(ffn::threading::Config {
+            kind: ffn::threading::Type::Frame,
+            count: 0,
+        });
 
         let mut decoder_data = Box::pin(DecoderData { hw_pixel_format });
         unsafe {
@@ -263,8 +268,8 @@ impl Decoder {
 
         Ok((
             Decoder {
-                format_ctx,
-                decoder_ctx,
+                format_ctx: Mutex::new(format_ctx),
+                decoder_ctx: Mutex::new(decoder_ctx),
                 hwctx,
                 video_stream_index,
                 query_info,

@@ -5,7 +5,7 @@ use std::{
     i64,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -40,13 +40,20 @@ impl PlaybackState {
 }
 
 pub(crate) struct PacketQueueMetadata {
-    duration: AtomicI64,
+    pub duration: AtomicI64,
+    pub serial: AtomicU32,
+}
+
+struct Packet {
+    pub packet: ffn::Packet,
+    pub serial: u32,
 }
 
 #[derive(Clone)]
 pub(crate) struct PacketSender {
     metadata: Arc<PacketQueueMetadata>,
-    tx: Sender<ffn::Packet>,
+    rx: Receiver<Packet>,
+    tx: Sender<Packet>,
 }
 
 impl PacketSender {
@@ -56,10 +63,11 @@ impl PacketSender {
         self.metadata
             .duration
             .fetch_add(packet.duration(), Ordering::SeqCst);
-        self.tx.send(packet).unwrap();
+        let serial = self.metadata.serial.load(Ordering::SeqCst);
+        self.tx.send(Packet { packet, serial }).unwrap();
     }
 
-    unsafe fn push_null(&self, mut packet: ffn::Packet, stream_index: usize) {
+    fn push_null(&self, mut packet: ffn::Packet, stream_index: usize) {
         packet.set_stream(stream_index);
         self.push(packet);
     }
@@ -67,6 +75,12 @@ impl PacketSender {
     fn has_enough_packets(&self, time_base: ffn::Rational) -> bool {
         self.tx.len() > Self::MIN_FRAMES
             && (f64::from(time_base) * self.metadata.duration.load(Ordering::SeqCst) as f64) > 1.0
+    }
+
+    fn flush(&self) {
+        while let Ok(_) = self.rx.try_recv() {}
+        self.metadata.duration.store(0, Ordering::SeqCst);
+        self.metadata.serial.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -76,17 +90,17 @@ unsafe impl Sync for PacketSender {}
 #[derive(Clone)]
 pub(crate) struct PacketReceiver {
     metadata: Arc<PacketQueueMetadata>,
-    rx: Receiver<ffn::Packet>,
+    rx: Receiver<Packet>,
 }
 
 impl PacketReceiver {
-    fn try_receive(&self) -> Option<ffn::Packet> {
+    fn try_receive(&self) -> Option<Packet> {
         let Ok(recv) = self.rx.try_recv() else {
             return None;
         };
         self.metadata
             .duration
-            .fetch_sub(recv.duration(), Ordering::SeqCst);
+            .fetch_sub(recv.packet.duration(), Ordering::SeqCst);
         Some(recv)
     }
 }
@@ -94,17 +108,22 @@ impl PacketReceiver {
 unsafe impl Send for PacketReceiver {}
 unsafe impl Sync for PacketReceiver {}
 
-pub(crate) fn packet_queue() -> (PacketSender, PacketReceiver) {
+pub(crate) fn packet_queue() -> (PacketSender, PacketReceiver, Arc<PacketQueueMetadata>) {
     let metadata = Arc::new(PacketQueueMetadata {
         duration: AtomicI64::new(0),
+        serial: AtomicU32::new(0),
     });
     let (tx, rx) = unbounded();
     let tx = PacketSender {
         metadata: metadata.clone(),
+        rx: rx.clone(),
         tx,
     };
-    let rx = PacketReceiver { metadata, rx };
-    (tx, rx)
+    let rx = PacketReceiver {
+        metadata: metadata.clone(),
+        rx,
+    };
+    (tx, rx, metadata)
 }
 
 #[derive(Debug)]
@@ -113,21 +132,19 @@ pub(crate) enum ReadMessage {
 }
 
 pub(crate) struct ReadThread {
-    decoder: Arc<Mutex<Decoder>>,
+    decoder: Arc<Decoder>,
     pbs: Arc<PlaybackState>,
     was_paused: bool,
     video_tx: PacketSender,
-    video_rx: PacketReceiver,
     frame_queue: FrameQueue,
     messages: Receiver<ReadMessage>,
 }
 
 impl ReadThread {
     pub fn new(
-        decoder: Arc<Mutex<Decoder>>,
+        decoder: Arc<Decoder>,
         pbs: Arc<PlaybackState>,
         video_tx: PacketSender,
-        video_rx: PacketReceiver,
         frame_queue: FrameQueue,
         messages: Receiver<ReadMessage>,
     ) -> Self {
@@ -136,7 +153,6 @@ impl ReadThread {
             pbs,
             was_paused: false,
             video_tx,
-            video_rx,
             frame_queue,
             messages,
         }
@@ -145,24 +161,59 @@ impl ReadThread {
     fn run_thread(&mut self) {
         const MAX_QUEUE_SIZE: usize = 15 * 1024 * 1024;
 
-        let time_base = self
+        let time_base = self.decoder.query_info.time_base;
+
+        let mut format_ctx = self
             .decoder
+            .format_ctx
             .lock()
-            .expect("lock decoder")
-            .query_info
-            .time_base;
+            .expect("lock AVFormatContext");
 
         while self.pbs.alive.load(Ordering::Relaxed) {
             let paused = self.pbs.paused.load(Ordering::Relaxed);
             if self.was_paused != paused {
                 self.was_paused = paused;
-                let mut decoder = self.decoder.lock().expect("lock decoder");
                 if let Err(error) = if self.was_paused {
-                    decoder.format_ctx.pause()
+                    format_ctx.pause()
                 } else {
-                    decoder.format_ctx.play()
+                    format_ctx.play()
                 } {
                     log::error!("failed to play/pause stream: {}", error);
+                }
+            }
+
+            while let Ok(message) = self.messages.try_recv() {
+                match message {
+                    ReadMessage::SeekStream(position) => {
+                        if let Err(error) = {
+                            let (ts, flags) = match position {
+                                Position::Time(duration) => {
+                                    let ts =
+                                        (duration.as_secs_f64() * ff::AV_TIME_BASE as f64) as i64;
+                                    (ts, 0)
+                                }
+                                Position::Frame(frame) => (frame as i64, ff::AVSEEK_FLAG_FRAME),
+                            };
+                            let err = unsafe {
+                                ff::avformat_seek_file(
+                                    format_ctx.as_mut_ptr(),
+                                    -1,
+                                    i64::MIN,
+                                    ts,
+                                    i64::MAX,
+                                    flags,
+                                )
+                            };
+                            (err == 0).then_some(()).ok_or(ffn::Error::from(err))
+                        } {
+                            log::error!("failed to seek stream: {}", error);
+                        } else {
+                            self.pbs.is_eof.store(false, Ordering::SeqCst);
+                            self.video_tx.flush();
+                            self.video_tx
+                                .push_null(ffn::Packet::empty(), self.decoder.video_stream_index);
+                        }
+                    }
                 }
             }
 
@@ -184,27 +235,25 @@ impl ReadThread {
             }
 
             let mut packet = ffn::Packet::empty();
-            let mut decoder = self.decoder.lock().expect("lock decoder");
-            match packet.read(&mut decoder.format_ctx) {
+            match packet.read(&mut format_ctx) {
                 Ok(_) => {
                     self.pbs.is_eof.store(false, Ordering::SeqCst);
                 }
                 Err(error) => {
                     if !is_eof
                         && (error == ffn::Error::Eof
-                            || unsafe { ff::avio_feof((*decoder.format_ctx.as_ptr()).pb) != 0 })
+                            || unsafe { ff::avio_feof((*format_ctx.as_ptr()).pb) != 0 })
                     {
-                        unsafe {
-                            // flush
-                            self.video_tx
-                                .push_null(ffn::Packet::empty(), decoder.video_stream_index);
-                            // self.audio_q.push_null();
-                            // self.subtitle_q.push_null();
-                        }
+                        // flush
+                        self.video_tx
+                            .push_null(ffn::Packet::empty(), self.decoder.video_stream_index);
+                        // self.audio_q.push_null();
+                        // self.subtitle_q.push_null();
+
                         self.pbs.is_eof.store(true, Ordering::SeqCst);
                     }
 
-                    let avio_error = unsafe { (*(*decoder.format_ctx.as_ptr()).pb).error };
+                    let avio_error = unsafe { (*(*format_ctx.as_ptr()).pb).error };
                     if avio_error != 0 {
                         log::error!("AVIOContext error {}", avio_error);
                     }
@@ -215,51 +264,8 @@ impl ReadThread {
             }
 
             let stream_index = packet.stream();
-            if stream_index == decoder.video_stream_index {
+            if stream_index == self.decoder.video_stream_index {
                 self.video_tx.push(packet);
-            }
-
-            while let Ok(message) = self.messages.try_recv() {
-                match message {
-                    ReadMessage::SeekStream(position) => {
-                        if let Err(error) = {
-                            let (ts, flags) = match position {
-                                Position::Time(duration) => {
-                                    let ts =
-                                        (duration.as_secs_f64() * ff::AV_TIME_BASE as f64) as i64;
-                                    (ts, 0)
-                                }
-                                Position::Frame(frame) => (frame as i64, ff::AVSEEK_FLAG_FRAME),
-                            };
-                            let err = unsafe {
-                                ff::avformat_seek_file(
-                                    decoder.format_ctx.as_mut_ptr(),
-                                    -1,
-                                    i64::MIN,
-                                    ts,
-                                    i64::MAX,
-                                    flags,
-                                )
-                            };
-                            (err == 0).then_some(()).ok_or(ffn::Error::from(err))
-                        } {
-                            log::error!("failed to seek stream: {}", error);
-                        } else {
-                            decoder.decoder_ctx.flush();
-                            self.pbs.is_eof.store(false, Ordering::SeqCst);
-                            while let Some(frame) = self.frame_queue.try_next() {
-                                self.frame_queue.release(frame);
-                            }
-                            while let Some(_) = self.video_rx.try_receive() {
-                                /* flush packet queue */
-                            }
-                            /*unsafe {
-                                self.video_tx
-                                    .push_null(ffn::Packet::empty(), decoder.video_stream_index);
-                            }*/
-                        }
-                    }
-                }
             }
 
             // TODO: handle audio/subtitle packets
@@ -276,12 +282,17 @@ impl ReadThread {
 unsafe impl Send for ReadThread {}
 unsafe impl Sync for ReadThread {}
 
+pub(crate) struct Frame {
+    pub frame: ffn::Frame,
+    pub serial: u32,
+}
+
 #[derive(Clone)]
 pub(crate) struct FrameQueue {
-    free_tx: Sender<ffn::Frame>,
-    free_rx: Receiver<ffn::Frame>,
-    queue_tx: Sender<ffn::Frame>,
-    queue_rx: Receiver<ffn::Frame>,
+    free_tx: Sender<Frame>,
+    free_rx: Receiver<Frame>,
+    queue_tx: Sender<Frame>,
+    queue_rx: Receiver<Frame>,
 }
 
 impl FrameQueue {
@@ -291,7 +302,12 @@ impl FrameQueue {
 
         for _ in 0..capacity {
             let frame = unsafe { ffn::Frame::empty() };
-            free_tx.send(frame).unwrap();
+            free_tx
+                .send(Frame {
+                    frame,
+                    serial: u32::MAX,
+                })
+                .unwrap();
         }
 
         FrameQueue {
@@ -302,12 +318,13 @@ impl FrameQueue {
         }
     }
 
-    pub fn send(&self, frame: &mut ffn::Frame) {
+    pub fn send(&self, frame: &mut ffn::Frame, serial: u32) {
         if let Ok(mut dst) = self.free_rx.recv() {
             unsafe {
-                ff::av_frame_move_ref(dst.as_mut_ptr(), frame.as_mut_ptr());
+                ff::av_frame_move_ref(dst.frame.as_mut_ptr(), frame.as_mut_ptr());
                 ff::av_frame_unref(frame.as_mut_ptr());
             }
+            dst.serial = serial;
             self.queue_tx.send(dst).unwrap();
         }
     }
@@ -316,12 +333,12 @@ impl FrameQueue {
         self.queue_rx.len()
     }
 
-    pub fn try_next(&self) -> Option<ffn::Frame> {
+    pub fn try_next(&self) -> Option<Frame> {
         self.queue_rx.try_recv().ok()
     }
 
-    pub fn release(&self, mut frame: ffn::Frame) {
-        unsafe { ff::av_frame_unref(frame.as_mut_ptr()) };
+    pub fn release(&self, mut frame: Frame) {
+        unsafe { ff::av_frame_unref(frame.frame.as_mut_ptr()) };
         self.free_tx.send(frame).unwrap();
     }
 }
@@ -330,7 +347,7 @@ unsafe impl Send for FrameQueue {}
 unsafe impl Sync for FrameQueue {}
 
 pub(crate) struct VideoThread {
-    decoder: Arc<Mutex<Decoder>>,
+    decoder: Arc<Decoder>,
     pbs: Arc<PlaybackState>,
     video_rx: PacketReceiver,
     frame_queue: FrameQueue,
@@ -338,7 +355,7 @@ pub(crate) struct VideoThread {
 
 impl VideoThread {
     pub fn new(
-        decoder: Arc<Mutex<Decoder>>,
+        decoder: Arc<Decoder>,
         pbs: Arc<PlaybackState>,
         video_rx: PacketReceiver,
         frame_queue: FrameQueue,
@@ -352,40 +369,60 @@ impl VideoThread {
     }
 
     fn run_thread(&mut self) {
+        let mut packet_serial = 0;
+
         let mut frame = unsafe { ffn::Frame::empty() };
+
+        let mut decoder_ctx = self
+            .decoder
+            .decoder_ctx
+            .lock()
+            .expect("lock AVCodecContext");
+
         while self.pbs.alive.load(Ordering::Relaxed) {
-            let mut decoder = self.decoder.lock().expect("lock decoder");
+            if packet_serial == self.video_rx.metadata.serial.load(Ordering::SeqCst) {
+                loop {
+                    if self.frame_queue.free_rx.is_empty() {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
 
-            let Some(packet) = self.video_rx.try_receive() else {
-                continue;
-            };
-
-            if let Err(error) = decoder.decoder_ctx.send_packet(&packet) {
-                log::error!("failed to send packet: {}", error);
+                    match decoder_ctx.receive_frame(&mut frame) {
+                        Ok(_) => {
+                            if let Some(pts) = frame.pts() {
+                                self.pbs.current_pts.store(pts, Ordering::SeqCst);
+                            }
+                            self.frame_queue.send(&mut frame, packet_serial);
+                        }
+                        Err(ffn::Error::Eof) => {
+                            decoder_ctx.flush();
+                            break;
+                        }
+                        Err(ffn::Error::Other { errno: ff::EAGAIN }) => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
             }
 
-            loop {
-                if self.frame_queue.free_rx.is_empty() {
-                    std::thread::sleep(Duration::from_millis(5));
+            let packet = loop {
+                let Some(packet) = self.video_rx.try_receive() else {
                     continue;
+                };
+
+                if packet_serial != packet.serial {
+                    decoder_ctx.flush();
+                    packet_serial = packet.serial;
                 }
 
-                match decoder.decoder_ctx.receive_frame(&mut frame) {
-                    Ok(_) => {
-                        if let Some(pts) = frame.pts() {
-                            self.pbs.current_pts.store(pts, Ordering::SeqCst);
-                        }
-                        self.frame_queue.send(&mut frame);
-                    }
-                    Err(ffn::Error::Eof) => {
-                        decoder.decoder_ctx.flush();
-                        break;
-                    }
-                    Err(ffn::Error::Other { errno: ff::EAGAIN }) => {
-                        break;
-                    }
-                    _ => {}
+                if packet_serial == self.video_rx.metadata.serial.load(Ordering::SeqCst) {
+                    break packet;
                 }
+            };
+
+            if let Err(error) = decoder_ctx.send_packet(&packet.packet) {
+                log::error!("failed to send packet: {}", error);
             }
         }
     }

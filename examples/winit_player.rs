@@ -128,8 +128,6 @@ fn main() {
         ],
     });
 
-    video.seek(Position::Time(video.position() + Duration::from_secs(3)));
-
     let window = &window;
     event_loop
         .run(move |event, target| match event {
@@ -142,7 +140,6 @@ fn main() {
                     window.request_redraw();
                 }
                 WindowEvent::RedrawRequested => {
-                    std::thread::sleep(Duration::from_millis(32));
                     let frame = surface.get_current_texture().unwrap();
                     let frame_view = frame.texture.create_view(&Default::default());
 
@@ -174,7 +171,7 @@ fn main() {
                     window.pre_present_notify();
                     frame.present();
 
-                    //std::thread::sleep(wait);
+                    std::thread::sleep(wait);
                     window.request_redraw();
                 }
                 WindowEvent::KeyboardInput { event, .. }

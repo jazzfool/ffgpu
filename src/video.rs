@@ -2,7 +2,10 @@ use crate::{
     context::pipeline_cache::PipelineCache,
     decode::{Decoder, FrameDecoder, QueryInfo},
     error::Result,
-    playback::{FrameQueue, PlaybackState, ReadMessage, ReadThread, VideoThread, packet_queue},
+    playback::{
+        Frame, FrameQueue, PacketQueueMetadata, PlaybackState, ReadMessage, ReadThread,
+        VideoThread, packet_queue,
+    },
 };
 use crossbeam_channel::{Sender, unbounded};
 use ffmpeg_next::{self as ffn, sys as ff};
@@ -26,6 +29,7 @@ pub struct Video {
     queue: wgpu::Queue,
 
     pbs: Arc<PlaybackState>,
+    video_queue: Arc<PacketQueueMetadata>,
     frame_decoder: FrameDecoder,
     frame_queue: FrameQueue,
     read_thread: Option<JoinHandle<()>>,
@@ -36,7 +40,8 @@ pub struct Video {
     query_info: QueryInfo,
     frame_timer: f64,
     last_pts: i64,
-    queued_frame: Option<ffn::Frame>,
+    last_serial: u32,
+    queued_frame: Option<Frame>,
 }
 
 impl Video {
@@ -54,11 +59,11 @@ impl Video {
         let (stream_decoder, frame_decoder) = Decoder::new(&device, pipeline_cache, path)?;
         let query_info = stream_decoder.query_info;
 
-        let stream_decoder = Arc::new(Mutex::new(stream_decoder));
+        let stream_decoder = Arc::new(stream_decoder);
 
         let pbs = Arc::new(PlaybackState::new());
 
-        let (video_tx, video_rx) = packet_queue();
+        let (video_tx, video_rx, video_queue) = packet_queue();
         let frame_queue = FrameQueue::new(18);
 
         let (read_msg_tx, read_msg_rx) = unbounded();
@@ -67,7 +72,6 @@ impl Video {
             stream_decoder.clone(),
             pbs.clone(),
             video_tx,
-            video_rx.clone(),
             frame_queue.clone(),
             read_msg_rx,
         )
@@ -88,6 +92,7 @@ impl Video {
             queue,
 
             pbs,
+            video_queue,
             frame_decoder,
             frame_queue,
             read_thread: Some(read_thread),
@@ -98,6 +103,7 @@ impl Video {
             query_info,
             frame_timer: 0.0,
             last_pts: 0,
+            last_serial: 0,
             queued_frame: None,
         })
     }
@@ -109,17 +115,27 @@ impl Video {
     fn update_frame(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        frame: &ffn::Frame,
+        frame: &Frame,
         _queued_len: usize,
         retry: &mut bool,
         wait_duration: &mut Duration,
     ) -> bool {
         let time = unsafe { ff::av_gettime_relative() as f64 / 1000000.0 };
 
-        let best_effort_timestamp = unsafe { (*frame.as_ptr()).best_effort_timestamp };
+        if frame.serial != self.video_queue.serial.load(Ordering::SeqCst) {
+            self.frame_timer = time;
+            *retry = true;
+            return true;
+        }
 
-        let duration = (best_effort_timestamp as f64 * f64::from(self.query_info.time_base))
-            - (self.last_pts as f64 * f64::from(self.query_info.time_base));
+        let best_effort_timestamp = unsafe { (*frame.frame.as_ptr()).best_effort_timestamp };
+
+        let duration = if frame.serial == self.last_serial {
+            (best_effort_timestamp as f64 * f64::from(self.query_info.time_base))
+                - (self.last_pts as f64 * f64::from(self.query_info.time_base))
+        } else {
+            0.0
+        };
         let duration = if duration < 0.0 || duration > 3600.0 {
             if self.query_info.framerate.0 > 0 && self.query_info.framerate.1 > 0 {
                 f64::from(self.query_info.framerate.invert())
@@ -136,8 +152,8 @@ impl Video {
 
         if time < self.frame_timer + delay {
             // too early
-            //*retry = true;
-            //return false;
+            *retry = true;
+            return false;
         }
 
         self.frame_timer += delay;
@@ -153,6 +169,7 @@ impl Video {
         }*/
 
         self.last_pts = best_effort_timestamp;
+        self.last_serial = frame.serial;
         unsafe {
             self.frame_decoder.decode_native_frame(
                 &self.instance,
@@ -160,7 +177,7 @@ impl Video {
                 &self.device,
                 &self.queue,
                 encoder,
-                frame,
+                &frame.frame,
             )
         };
 
@@ -214,7 +231,6 @@ impl Video {
         if let Some(queued_frame) = self.queued_frame.take() {
             self.frame_queue.release(queued_frame);
         }
-        self.last_pts = i64::MAX;
         // TODO: force video thread to step one frame if paused
     }
 }
