@@ -398,7 +398,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
 
     unsafe fn import_frame(
         &mut self,
-        mut frame: NonNull<ff::AVFrame>,
+        frame: NonNull<ff::AVFrame>,
         _instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
@@ -407,7 +407,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
         layout: &wgpu::BindGroupLayout,
     ) -> Option<&wgpu::BindGroup> {
         unsafe {
-            let frame = frame.as_mut();
+            let frame = frame.as_ref();
             if frame.data[0].is_null() {
                 return None;
             }
