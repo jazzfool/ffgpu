@@ -387,29 +387,27 @@ impl VideoThread {
             .expect("lock AVCodecContext");
 
         while self.pbs.alive.load(Ordering::Relaxed) {
-            if packet_serial == self.video_rx.metadata.serial.load(Ordering::SeqCst) {
-                loop {
-                    if self.frame_queue.free_rx.is_empty() {
-                        std::thread::sleep(Duration::from_millis(10));
-                        continue;
-                    }
+            while self.pbs.alive.load(Ordering::Relaxed) {
+                if self.frame_queue.free_rx.is_empty() {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
 
-                    match decoder_ctx.receive_frame(&mut frame) {
-                        Ok(_) => {
-                            if let Some(pts) = frame.pts() {
-                                self.pbs.current_pts.store(pts, Ordering::SeqCst);
-                            }
-                            self.frame_queue.send(&mut frame, packet_serial);
+                match decoder_ctx.receive_frame(&mut frame) {
+                    Ok(_) => {
+                        if let Some(pts) = frame.pts() {
+                            self.pbs.current_pts.store(pts, Ordering::SeqCst);
                         }
-                        Err(ffn::Error::Eof) => {
-                            decoder_ctx.flush();
-                            break;
-                        }
-                        Err(ffn::Error::Other { errno: ff::EAGAIN }) => {
-                            break;
-                        }
-                        _ => {}
+                        self.frame_queue.send(&mut frame, packet_serial);
                     }
+                    Err(ffn::Error::Eof) => {
+                        decoder_ctx.flush();
+                        break;
+                    }
+                    Err(ffn::Error::Other { errno: ff::EAGAIN }) => {
+                        break;
+                    }
+                    _ => {}
                 }
             }
 

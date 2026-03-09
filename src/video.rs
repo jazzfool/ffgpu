@@ -34,10 +34,11 @@ pub struct Video {
     frame_queue: FrameQueue,
     read_thread: Option<JoinHandle<()>>,
     video_thread: Option<JoinHandle<()>>,
+    query_info: QueryInfo,
 
     read_messages: Sender<ReadMessage>,
 
-    query_info: QueryInfo,
+    looping: bool,
     frame_timer: f64,
     last_pts: i64,
     last_serial: u32,
@@ -97,10 +98,11 @@ impl Video {
             frame_queue,
             read_thread: Some(read_thread),
             video_thread: Some(video_thread),
+            query_info,
 
             read_messages: read_msg_tx,
 
-            query_info,
+            looping: false,
             frame_timer: 0.0,
             last_pts: 0,
             last_serial: 0,
@@ -121,6 +123,14 @@ impl Video {
         wait_duration: &mut Duration,
     ) -> bool {
         let time = unsafe { ff::av_gettime_relative() as f64 / 1000000.0 };
+
+        if self.frame_queue.queued_len() == 0
+            && self.pbs.is_eof.load(Ordering::SeqCst)
+            && self.looping
+        {
+            // eof reached
+            self.seek(Position::Frame(0));
+        }
 
         if frame.serial != self.video_queue.serial.load(Ordering::SeqCst) {
             self.frame_timer = time;
@@ -244,6 +254,19 @@ impl Video {
 
     pub fn set_paused(&mut self, paused: bool) {
         self.pbs.paused.store(paused, Ordering::SeqCst);
+    }
+
+    pub fn looping(&self) -> bool {
+        self.looping
+    }
+
+    pub fn set_looping(&mut self, looping: bool) {
+        self.looping = looping;
+    }
+
+    pub fn step_one_frame(&self) {
+        self.pbs.paused.store(false, Ordering::SeqCst);
+        self.pbs.step.store(true, Ordering::SeqCst);
     }
 }
 

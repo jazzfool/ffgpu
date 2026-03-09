@@ -186,6 +186,12 @@ fn main() {
                         PhysicalKey::Code(KeyCode::ArrowRight) => {
                             video.seek(Position::Time(video.position() + Duration::from_secs(3)))
                         }
+                        PhysicalKey::Code(KeyCode::Period) => {
+                            video.step_one_frame();
+                        }
+                        PhysicalKey::Code(KeyCode::KeyL) => {
+                            video.set_looping(!video.looping());
+                        }
                         _ => {}
                     }
                 }
