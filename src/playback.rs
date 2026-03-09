@@ -1,11 +1,11 @@
 use crate::{decode::Decoder, video::Position};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use ffmpeg_next::{self as ffn, packet::Ref, sys as ff};
+use ffmpeg_next::{self as ffn, sys as ff};
 use std::{
     i64,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -18,6 +18,7 @@ pub(crate) struct PlaybackState {
     pub(crate) paused: AtomicBool,
     pub(crate) is_eof: AtomicBool,
     pub(crate) current_pts: AtomicI64,
+    pub(crate) step: AtomicBool,
 }
 
 impl PlaybackState {
@@ -27,6 +28,7 @@ impl PlaybackState {
             paused: AtomicBool::new(false),
             is_eof: AtomicBool::new(false),
             current_pts: AtomicI64::new(0),
+            step: AtomicBool::new(false),
         }
     }
 
@@ -212,6 +214,11 @@ impl ReadThread {
                             self.video_tx.flush();
                             self.video_tx
                                 .push_null(ffn::Packet::empty(), self.decoder.video_stream_index);
+
+                            if paused {
+                                self.pbs.step.store(true, Ordering::SeqCst);
+                                self.pbs.paused.store(false, Ordering::SeqCst);
+                            }
                         }
                     }
                 }

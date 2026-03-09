@@ -8,10 +8,10 @@ use crate::{
     },
 };
 use crossbeam_channel::{Sender, unbounded};
-use ffmpeg_next::{self as ffn, sys as ff};
+use ffmpeg_next::sys as ff;
 use std::{
     path::Path,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{Arc, atomic::Ordering},
     thread::JoinHandle,
     time::Duration,
 };
@@ -181,6 +181,10 @@ impl Video {
             )
         };
 
+        if self.pbs.step.fetch_and(false, Ordering::SeqCst) {
+            self.set_paused(true);
+        }
+
         true
     }
 
@@ -232,6 +236,14 @@ impl Video {
             self.frame_queue.release(queued_frame);
         }
         // TODO: force video thread to step one frame if paused
+    }
+
+    pub fn paused(&self) -> bool {
+        self.pbs.paused.load(Ordering::SeqCst)
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.pbs.paused.store(paused, Ordering::SeqCst);
     }
 }
 

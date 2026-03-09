@@ -1,7 +1,6 @@
 use ffgpu::{context::Context, video::Position};
 use std::{borrow::Cow, sync::Arc, time::Duration};
 use winit::{
-    dpi::LogicalSize,
     event::{ElementState, Event, WindowEvent},
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
@@ -178,6 +177,9 @@ fn main() {
                     if event.state == ElementState::Pressed =>
                 {
                     match event.physical_key {
+                        PhysicalKey::Code(KeyCode::Space) => {
+                            video.set_paused(!video.paused());
+                        }
                         PhysicalKey::Code(KeyCode::ArrowLeft) => video.seek(Position::Time(
                             video.position() - Duration::from_secs(3).min(video.position()),
                         )),
