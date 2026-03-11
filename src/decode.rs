@@ -15,6 +15,7 @@ use std::{
     pin::Pin,
     ptr::{NonNull, null_mut},
     sync::Mutex,
+    time::Duration,
 };
 
 pub(crate) trait HardwareDecoder {
@@ -161,6 +162,7 @@ pub(crate) struct QueryInfo {
     pub framerate: ffn::Rational,
     pub width: u32,
     pub height: u32,
+    pub duration: Duration,
 }
 
 struct DecoderData {
@@ -264,6 +266,10 @@ impl Decoder {
             framerate: video_stream.avg_frame_rate(),
             width: width,
             height: height,
+            duration: Duration::from_secs_f64(
+                video_stream.duration() as f64 * video_stream.time_base().0 as f64
+                    / video_stream.time_base().1 as f64,
+            ),
         };
 
         Ok((

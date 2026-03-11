@@ -386,7 +386,10 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                             ))
                         }
                         backend => {
-                            log::warn!("unsupported zero-copy WGPU backend {} (must be Metal)", backend);
+                            log::warn!(
+                                "unsupported zero-copy WGPU backend {} (must be Metal)",
+                                backend
+                            );
                             log::warn!("using CPU frame copies");
                             ImportedTexture::PlanarCopy(CopiedTexture::new(
                                 device,

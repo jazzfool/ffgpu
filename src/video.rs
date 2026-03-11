@@ -3,8 +3,8 @@ use crate::{
     decode::{Decoder, FrameDecoder, QueryInfo},
     error::Result,
     playback::{
-        Frame, FrameQueue, PacketQueueMetadata, PlaybackState, ReadMessage, ReadThread,
-        VideoThread, packet_queue,
+        DecodeMessage, Frame, FrameQueue, PacketQueueMetadata, PlayState, PlaybackState,
+        ReadMessage, ReadThread, VideoThread, packet_queue,
     },
 };
 use crossbeam_channel::{Sender, unbounded};
@@ -17,9 +17,9 @@ use std::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Position {
-    Time(Duration),
-    Frame(u64),
+pub enum SeekMode {
+    Fast,
+    Accurate,
 }
 
 pub struct Video {
@@ -37,6 +37,7 @@ pub struct Video {
     query_info: QueryInfo,
 
     read_messages: Sender<ReadMessage>,
+    video_decode_messages: Sender<DecodeMessage>,
 
     looping: bool,
     frame_timer: f64,
@@ -65,7 +66,7 @@ impl Video {
         let pbs = Arc::new(PlaybackState::new());
 
         let (video_tx, video_rx, video_queue) = packet_queue();
-        let frame_queue = FrameQueue::new(18);
+        let frame_queue = FrameQueue::new(17);
 
         let (read_msg_tx, read_msg_rx) = unbounded();
 
@@ -78,11 +79,14 @@ impl Video {
         )
         .run();
 
+        let (video_decode_tx, video_decode_rx) = unbounded();
+
         let video_thread = VideoThread::new(
             stream_decoder.clone(),
             pbs.clone(),
             video_rx,
             frame_queue.clone(),
+            video_decode_rx,
         )
         .run();
 
@@ -101,6 +105,7 @@ impl Video {
             query_info,
 
             read_messages: read_msg_tx,
+            video_decode_messages: video_decode_tx,
 
             looping: false,
             frame_timer: 0.0,
@@ -123,14 +128,6 @@ impl Video {
         wait_duration: &mut Duration,
     ) -> bool {
         let time = unsafe { ff::av_gettime_relative() as f64 / 1000000.0 };
-
-        if self.frame_queue.queued_len() == 0
-            && self.pbs.is_eof.load(Ordering::SeqCst)
-            && self.looping
-        {
-            // eof reached
-            self.seek(Position::Frame(0));
-        }
 
         if frame.serial != self.video_queue.serial.load(Ordering::SeqCst) {
             self.frame_timer = time;
@@ -162,7 +159,6 @@ impl Video {
 
         if time < self.frame_timer + delay {
             // too early
-            *retry = true;
             return false;
         }
 
@@ -191,16 +187,29 @@ impl Video {
             )
         };
 
-        if self.pbs.step.fetch_and(false, Ordering::SeqCst) {
-            self.set_paused(true);
+        if self.pbs.play_state() == PlayState::Step {
+            self.pbs
+                .play_state
+                .store(PlayState::Paused as _, Ordering::Relaxed);
         }
 
         true
     }
 
     pub fn update(&mut self, encoder: &mut wgpu::CommandEncoder) -> Duration {
-        if self.pbs.paused() || self.frame_queue.queued_len() == 0 {
-            return Duration::from_millis(5);
+        let play_state = self.pbs.play_state();
+
+        if self.frame_queue.queued_len() == 0
+            && self.pbs.is_eof.load(Ordering::SeqCst)
+            && self.looping
+            && play_state != PlayState::Paused
+        {
+            // eof reached
+            self.seek(Duration::ZERO, SeekMode::Fast);
+        }
+
+        if play_state == PlayState::Paused || self.frame_queue.queued_len() == 0 {
+            return Duration::from_millis(50);
         }
 
         let mut duration = Duration::from_secs_f64(f64::from(self.query_info.framerate.invert()));
@@ -228,32 +237,64 @@ impl Video {
         duration
     }
 
-    pub fn position(&self) -> Duration {
-        Duration::from_secs_f64(
-            self.pbs.current_pts.load(Ordering::SeqCst) as f64
-                * f64::from(self.query_info.time_base),
-        )
+    #[inline]
+    pub fn width(&self) -> u32 {
+        self.query_info.width
     }
 
-    pub fn seek(&mut self, position: impl Into<Position>) {
-        if let Err(error) = self
-            .read_messages
-            .send(ReadMessage::SeekStream(position.into()))
-        {
+    #[inline]
+    pub fn height(&self) -> u32 {
+        self.query_info.height
+    }
+
+    #[inline]
+    pub fn duration(&self) -> Duration {
+        self.query_info.duration
+    }
+
+    pub fn position(&self) -> Duration {
+        Duration::from_secs_f64(self.last_pts as f64 * f64::from(self.query_info.time_base))
+    }
+
+    pub fn seek(&mut self, position: Duration, mode: SeekMode) {
+        let position = position.min(self.duration());
+        let ts = (position.as_secs_f64() * ff::AV_TIME_BASE as f64) as i64;
+
+        if let Err(error) = self.read_messages.send(ReadMessage::SeekStream(ts)) {
             log::error!("failed to send seek message: {}", error);
         }
+
         if let Some(queued_frame) = self.queued_frame.take() {
             self.frame_queue.release(queued_frame);
         }
-        // TODO: force video thread to step one frame if paused
+
+        while let Some(frame) = self.frame_queue.try_next() {
+            self.frame_queue.release(frame);
+        }
+
+        match mode {
+            SeekMode::Accurate => {
+                let _ = self
+                    .video_decode_messages
+                    .send(DecodeMessage::SkipToTimestamp(ts));
+            }
+            _ => {}
+        }
     }
 
     pub fn paused(&self) -> bool {
-        self.pbs.paused.load(Ordering::SeqCst)
+        self.pbs.play_state() != PlayState::Playing
     }
 
     pub fn set_paused(&mut self, paused: bool) {
-        self.pbs.paused.store(paused, Ordering::SeqCst);
+        self.pbs.play_state.store(
+            if paused {
+                PlayState::Paused
+            } else {
+                PlayState::Playing
+            } as _,
+            Ordering::Relaxed,
+        );
     }
 
     pub fn looping(&self) -> bool {
@@ -265,8 +306,9 @@ impl Video {
     }
 
     pub fn step_one_frame(&self) {
-        self.pbs.paused.store(false, Ordering::SeqCst);
-        self.pbs.step.store(true, Ordering::SeqCst);
+        self.pbs
+            .play_state
+            .store(PlayState::Step as _, Ordering::Relaxed);
     }
 }
 

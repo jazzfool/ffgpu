@@ -1,8 +1,8 @@
-use ffgpu::{context::Context, video::Position};
+use ffgpu::{context::Context, video::SeekMode};
 use std::{borrow::Cow, sync::Arc, time::Duration};
 use winit::{
     event::{ElementState, Event, WindowEvent},
-    event_loop::EventLoop,
+    event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };
@@ -110,7 +110,11 @@ fn main() {
         ..Default::default()
     });
 
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
 
     let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
@@ -126,6 +130,18 @@ fn main() {
             },
         ],
     });
+
+    let mut font_system = glyphon::FontSystem::new();
+    let mut swash_cache = glyphon::SwashCache::new();
+    let text_cache = glyphon::Cache::new(&device);
+    let mut text_viewport = glyphon::Viewport::new(&device, &text_cache);
+    let mut text_atlas = glyphon::TextAtlas::new(&device, &queue, &text_cache, swapchain_format);
+    let mut text_renderer =
+        glyphon::TextRenderer::new(&mut text_atlas, &device, Default::default(), None);
+    let mut text_buffer_1 =
+        glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(12.0, 14.0));
+    let mut text_buffer_2 =
+        glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(12.0, 14.0));
 
     let window = &window;
     event_loop
@@ -145,6 +161,87 @@ fn main() {
                     let mut encoder = device.create_command_encoder(&Default::default());
 
                     let wait = video.update(&mut encoder);
+
+                    text_buffer_1.set_size(
+                        &mut font_system,
+                        Some(window.inner_size().width as f32 * window.scale_factor() as f32),
+                        Some(window.inner_size().height as f32 * window.scale_factor() as f32),
+                    );
+                    text_buffer_2.set_size(
+                        &mut font_system,
+                        Some(window.inner_size().width as f32 * window.scale_factor() as f32),
+                        Some(window.inner_size().height as f32 * window.scale_factor() as f32),
+                    );
+
+                    text_buffer_1.set_text(
+                        &mut font_system,
+                        &format!(
+                            "test.mp4\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\ndelay {:#?}",
+                            if video.paused() { "paused" } else { "playing" },
+                            if video.looping() { "on" } else { "off" },
+                            video.position().as_secs() / 60,
+                            video.position().as_secs(),
+                            video.position().as_millis() % 1000,
+                            wait,
+                        ),
+                        &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+                        glyphon::Shaping::Advanced,
+                        None,
+                    );
+                    text_buffer_1.shape_until_scroll(&mut font_system, false);
+
+                    text_buffer_2.set_text(
+                        &mut font_system,
+                        "[spacebar]: toggle pause\n[←→]arrow keys: seek (3s)\n[L]: toggle looping\n[>]: step one frame",
+                        &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+                        glyphon::Shaping::Advanced,
+                        None,
+                    );
+                    text_buffer_2.shape_until_scroll(&mut font_system, false);
+
+                    text_viewport.update(
+                        &queue,
+                        glyphon::Resolution {
+                            width: config.width,
+                            height: config.height,
+                        },
+                    );
+                    text_renderer
+                        .prepare(
+                            &device,
+                            &queue,
+                            &mut font_system,
+                            &mut text_atlas,
+                            &text_viewport,
+                            [
+                                glyphon::TextArea {
+                                    buffer: &text_buffer_1,
+                                    left: 10.0,
+                                    top: 10.0,
+                                    scale: 1.0,
+                                    bounds: glyphon::TextBounds {
+                                        left: 10,
+                                        top: 10,
+                                        right: 140,
+                                        bottom: i32::MAX,
+                                    },
+                                    default_color: glyphon::Color::rgb(255, 255, 255),
+                                    custom_glyphs: &[],
+                                },
+                                glyphon::TextArea {
+                                    buffer: &text_buffer_2,
+                                    left: 150.0,
+                                    top: 10.0,
+                                    scale: 1.0,
+                                    bounds: Default::default(),
+                                    default_color: glyphon::Color::rgb(255, 255, 255),
+                                    custom_glyphs: &[],
+                                },
+                            ],
+                            &mut swash_cache,
+                        )
+                        .unwrap();
+
                     {
                         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: None,
@@ -164,14 +261,25 @@ fn main() {
                         });
                         rpass.set_pipeline(&pipeline);
                         rpass.set_bind_group(0, &bg0, &[]);
+
+                        let ar = video.width() as f32 / video.height() as f32;
+                        let ww = config.width as f32;
+                        let wh = config.height as f32;
+                        let (vw, vh) = if (ww / wh) > ar { (ar * wh, wh) } else { (ww, ww / ar) };
+                        rpass.set_viewport((ww - vw) / 2., (wh - vh) / 2., vw, vh, 0.0, 1.0);
+
                         rpass.draw(0..3, 0..1);
+
+                        rpass.set_viewport(0.0, 0.0, config.width as _, config.height as _, 0.0, 1.0);
+                        text_renderer
+                            .render(&text_atlas, &text_viewport, &mut rpass)
+                            .unwrap();
                     }
                     queue.submit(Some(encoder.finish()));
                     window.pre_present_notify();
                     frame.present();
 
-                    std::thread::sleep(wait);
-                    window.request_redraw();
+                    target.set_control_flow(ControlFlow::wait_duration(wait));
                 }
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
@@ -180,11 +288,10 @@ fn main() {
                         PhysicalKey::Code(KeyCode::Space) => {
                             video.set_paused(!video.paused());
                         }
-                        PhysicalKey::Code(KeyCode::ArrowLeft) => video.seek(Position::Time(
-                            video.position() - Duration::from_secs(3).min(video.position()),
-                        )),
+                        PhysicalKey::Code(KeyCode::ArrowLeft) => video.seek(
+                            video.position() - Duration::from_secs(5).min(video.position()), SeekMode::Accurate),
                         PhysicalKey::Code(KeyCode::ArrowRight) => {
-                            video.seek(Position::Time(video.position() + Duration::from_secs(3)))
+                            video.seek(video.position() + Duration::from_secs(5), SeekMode::Accurate)
                         }
                         PhysicalKey::Code(KeyCode::Period) => {
                             video.step_one_frame();
@@ -197,6 +304,7 @@ fn main() {
                 }
                 _ => {}
             },
+            Event::NewEvents(winit::event::StartCause::ResumeTimeReached { .. }) => window.request_redraw(),
             _ => {}
         })
         .unwrap();

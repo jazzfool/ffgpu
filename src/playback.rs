@@ -1,11 +1,11 @@
-use crate::{decode::Decoder, video::Position};
+use crate::decode::Decoder;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use ffmpeg_next::{self as ffn, sys as ff};
 use std::{
     i64,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -13,27 +13,38 @@ use std::{
 
 // the following playback code is loosely based on ffplay.c
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlayState {
+    Playing = 0,
+    Paused,
+    Step,
+}
+
 pub(crate) struct PlaybackState {
     pub(crate) alive: AtomicBool,
-    pub(crate) paused: AtomicBool,
+    pub(crate) play_state: AtomicU8,
     pub(crate) is_eof: AtomicBool,
     pub(crate) current_pts: AtomicI64,
-    pub(crate) step: AtomicBool,
 }
 
 impl PlaybackState {
     pub fn new() -> Self {
         PlaybackState {
             alive: AtomicBool::new(true),
-            paused: AtomicBool::new(false),
+            play_state: AtomicU8::new(PlayState::Playing as u8),
             is_eof: AtomicBool::new(false),
             current_pts: AtomicI64::new(0),
-            step: AtomicBool::new(false),
         }
     }
 
-    pub fn paused(&self) -> bool {
-        self.paused.load(Ordering::SeqCst)
+    pub fn play_state(&self) -> PlayState {
+        match self.play_state.load(Ordering::Relaxed) {
+            0 => PlayState::Playing,
+            1 => PlayState::Paused,
+            2 => PlayState::Step,
+            _ => unreachable!(),
+        }
     }
 
     pub fn kill(&self) {
@@ -130,7 +141,7 @@ pub(crate) fn packet_queue() -> (PacketSender, PacketReceiver, Arc<PacketQueueMe
 
 #[derive(Debug)]
 pub(crate) enum ReadMessage {
-    SeekStream(Position),
+    SeekStream(i64),
 }
 
 pub(crate) struct ReadThread {
@@ -172,30 +183,24 @@ impl ReadThread {
             .expect("lock AVFormatContext");
 
         while self.pbs.alive.load(Ordering::Relaxed) {
-            let paused = self.pbs.paused.load(Ordering::Relaxed);
-            if self.was_paused != paused {
+            let play_state = self.pbs.play_state();
+            // TODO: for network streams
+            /*if self.was_paused != paused {
                 self.was_paused = paused;
                 if let Err(error) = if self.was_paused {
                     format_ctx.pause()
                 } else {
                     format_ctx.play()
                 } {
+                    dbg!(std::ffi::c_int::from(error));
                     log::error!("failed to play/pause stream: {}", error);
                 }
-            }
+            }*/
 
             while let Ok(message) = self.messages.try_recv() {
                 match message {
-                    ReadMessage::SeekStream(position) => {
+                    ReadMessage::SeekStream(ts) => {
                         if let Err(error) = {
-                            let (ts, flags) = match position {
-                                Position::Time(duration) => {
-                                    let ts =
-                                        (duration.as_secs_f64() * ff::AV_TIME_BASE as f64) as i64;
-                                    (ts, 0)
-                                }
-                                Position::Frame(frame) => (frame as i64, ff::AVSEEK_FLAG_FRAME),
-                            };
                             let err = unsafe {
                                 ff::avformat_seek_file(
                                     format_ctx.as_mut_ptr(),
@@ -203,9 +208,10 @@ impl ReadThread {
                                     i64::MIN,
                                     ts,
                                     i64::MAX,
-                                    flags,
+                                    ff::AVSEEK_FLAG_BACKWARD,
                                 )
                             };
+
                             (err == 0).then_some(()).ok_or(ffn::Error::from(err))
                         } {
                             log::error!("failed to seek stream: {}", error);
@@ -215,9 +221,10 @@ impl ReadThread {
                             self.video_tx
                                 .push_null(ffn::Packet::empty(), self.decoder.video_stream_index);
 
-                            if paused {
-                                self.pbs.step.store(true, Ordering::SeqCst);
-                                self.pbs.paused.store(false, Ordering::SeqCst);
+                            if false && play_state == PlayState::Paused {
+                                self.pbs
+                                    .play_state
+                                    .store(PlayState::Step as _, Ordering::Relaxed);
                             }
                         }
                     }
@@ -235,7 +242,7 @@ impl ReadThread {
 
             let is_eof = self.pbs.is_eof.load(Ordering::SeqCst);
 
-            if !paused && is_eof && self.frame_queue.queue_rx.is_empty() {
+            if play_state == PlayState::Playing && is_eof && self.frame_queue.queue_rx.is_empty() {
                 // TODO: loop video if looping is enabled
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
@@ -353,11 +360,16 @@ impl FrameQueue {
 unsafe impl Send for FrameQueue {}
 unsafe impl Sync for FrameQueue {}
 
+pub(crate) enum DecodeMessage {
+    SkipToTimestamp(i64),
+}
+
 pub(crate) struct VideoThread {
     decoder: Arc<Decoder>,
     pbs: Arc<PlaybackState>,
     video_rx: PacketReceiver,
     frame_queue: FrameQueue,
+    messages: Receiver<DecodeMessage>,
 }
 
 impl VideoThread {
@@ -366,12 +378,14 @@ impl VideoThread {
         pbs: Arc<PlaybackState>,
         video_rx: PacketReceiver,
         frame_queue: FrameQueue,
+        messages: Receiver<DecodeMessage>,
     ) -> Self {
         VideoThread {
             decoder,
             pbs,
             video_rx,
             frame_queue,
+            messages,
         }
     }
 
@@ -386,28 +400,89 @@ impl VideoThread {
             .lock()
             .expect("lock AVCodecContext");
 
+        let mut skip_to_ts = None;
+
         while self.pbs.alive.load(Ordering::Relaxed) {
+            while let Ok(message) = self.messages.try_recv() {
+                match message {
+                    DecodeMessage::SkipToTimestamp(ts) => {
+                        skip_to_ts = Some(ts);
+                    }
+                }
+            }
+
+            let mut prev_frame = None;
+
             while self.pbs.alive.load(Ordering::Relaxed) {
                 if self.frame_queue.free_rx.is_empty() {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 }
 
-                match decoder_ctx.receive_frame(&mut frame) {
+                let frame = match decoder_ctx.receive_frame(&mut frame) {
                     Ok(_) => {
                         if let Some(pts) = frame.pts() {
-                            self.pbs.current_pts.store(pts, Ordering::SeqCst);
+                            let av_pts = unsafe {
+                                ff::av_rescale_q(
+                                    pts,
+                                    self.decoder.query_info.time_base.into(),
+                                    ff::AV_TIME_BASE_Q,
+                                )
+                            };
+                            if let Some(ts) = skip_to_ts
+                                && av_pts < ts
+                            {
+                                // discard frame
+                                // but keep a ref in case next receive is EOF
+                                // in which case TS is past last frame
+                                let mut frame_ref = unsafe { ffn::Frame::empty() };
+                                unsafe {
+                                    ff::av_frame_move_ref(
+                                        frame_ref.as_mut_ptr(),
+                                        frame.as_mut_ptr(),
+                                    )
+                                };
+                                prev_frame = Some(frame_ref);
+                                continue;
+                            } else {
+                                prev_frame = None;
+                            }
                         }
-                        self.frame_queue.send(&mut frame, packet_serial);
+                        Some(&mut frame)
                     }
                     Err(ffn::Error::Eof) => {
-                        decoder_ctx.flush();
-                        break;
+                        if let Some(mut prev_frame) = prev_frame.take() {
+                            unsafe {
+                                ff::av_frame_move_ref(frame.as_mut_ptr(), prev_frame.as_mut_ptr())
+                            };
+                            Some(&mut frame)
+                        } else {
+                            decoder_ctx.flush();
+                            break;
+                        }
                     }
                     Err(ffn::Error::Other { errno: ff::EAGAIN }) => {
                         break;
                     }
-                    _ => {}
+                    _ => None,
+                };
+
+                if let Some(frame) = frame {
+                    let mut step = false;
+                    if let Some(pts) = frame.pts() {
+                        self.pbs.current_pts.store(pts, Ordering::SeqCst);
+                        if skip_to_ts.is_some() {
+                            skip_to_ts = None;
+                            step = self.pbs.play_state() == PlayState::Paused;
+                        }
+                    }
+
+                    self.frame_queue.send(frame, packet_serial);
+                    if step {
+                        self.pbs
+                            .play_state
+                            .store(PlayState::Step as _, Ordering::Relaxed);
+                    }
                 }
             }
 
