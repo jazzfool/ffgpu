@@ -147,7 +147,6 @@ pub(crate) enum ReadMessage {
 pub(crate) struct ReadThread {
     decoder: Arc<Decoder>,
     pbs: Arc<PlaybackState>,
-    was_paused: bool,
     video_tx: PacketSender,
     frame_queue: FrameQueue,
     messages: Receiver<ReadMessage>,
@@ -164,7 +163,6 @@ impl ReadThread {
         ReadThread {
             decoder,
             pbs,
-            was_paused: false,
             video_tx,
             frame_queue,
             messages,
@@ -402,7 +400,7 @@ impl VideoThread {
 
         let mut skip_to_ts = None;
 
-        while self.pbs.alive.load(Ordering::Relaxed) {
+        'exit: while self.pbs.alive.load(Ordering::Relaxed) {
             while let Ok(message) = self.messages.try_recv() {
                 match message {
                     DecodeMessage::SkipToTimestamp(ts) => {
@@ -487,6 +485,10 @@ impl VideoThread {
             }
 
             let packet = loop {
+                if !self.pbs.alive.load(Ordering::Relaxed) {
+                    break 'exit;
+                }
+
                 let Some(packet) = self.video_rx.try_receive() else {
                     continue;
                 };

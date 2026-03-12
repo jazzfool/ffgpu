@@ -176,7 +176,10 @@ fn main() {
                     text_buffer_1.set_text(
                         &mut font_system,
                         &format!(
-                            "test.mp4\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\ndelay {:#?}",
+                            "test.mp4\n{}x{}@{:.02}fps\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\ndelay {:#?}",
+                            video.width(),
+                            video.height(),
+                            video.framerate(),
                             if video.paused() { "paused" } else { "playing" },
                             if video.looping() { "on" } else { "off" },
                             video.position().as_secs() / 60,
@@ -192,7 +195,7 @@ fn main() {
 
                     text_buffer_2.set_text(
                         &mut font_system,
-                        "[spacebar]: toggle pause\n[←→]arrow keys: seek (3s)\n[L]: toggle looping\n[>]: step one frame",
+                        "[spacebar]: toggle pause\n[←→] arrow keys: seek (5s)\n[L]: toggle looping\n[>]: step one frame",
                         &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
                         glyphon::Shaping::Advanced,
                         None,

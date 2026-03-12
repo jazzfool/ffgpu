@@ -208,7 +208,7 @@ impl ImportedTexture {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::NV12,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[wgpu::TextureFormat::NV12],
                 },
             )
@@ -236,7 +236,7 @@ impl ImportedTexture {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: wgpu::TextureFormat::NV12,
-                        usage: wgpu::TextureUses::RESOURCE,
+                        usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_DST,
                         memory_flags: wgpu::hal::MemoryFlags::empty(),
                         view_formats: vec![],
                     },
@@ -256,7 +256,7 @@ impl ImportedTexture {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::NV12,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[wgpu::TextureFormat::NV12],
                 },
             )
@@ -368,6 +368,13 @@ impl ImportedTexture {
                         depth_or_array_layers: 1,
                     },
                 );
+
+                unsafe {
+                    d3d11_device
+                        .GetImmediateContext()
+                        .unwrap()
+                        .Unmap(&self.shared_texture, 0)
+                };
             }
         }
     }
@@ -375,7 +382,7 @@ impl ImportedTexture {
 
 pub struct D3D11VAHardwareDecoder {
     d3d11_ctx: *mut AVD3D11VADeviceContext,
-    d3d11_device: D3D11::ID3D11Device,
+    d3d11_device: ManuallyDrop<D3D11::ID3D11Device>,
     imported_texture: Option<ImportedTexture>,
 }
 
@@ -386,7 +393,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
         unsafe {
             let device_ctx = hwctx.as_ref().data as *mut ff::AVHWDeviceContext;
             let d3d11_ctx = (*device_ctx).hwctx as *mut AVD3D11VADeviceContext;
-            let d3d11_device: D3D11::ID3D11Device = core::mem::transmute((*d3d11_ctx).device);
+            let d3d11_device = ManuallyDrop::new(core::mem::transmute((*d3d11_ctx).device));
 
             D3D11VAHardwareDecoder {
                 d3d11_ctx,

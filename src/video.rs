@@ -66,7 +66,7 @@ impl Video {
         let pbs = Arc::new(PlaybackState::new());
 
         let (video_tx, video_rx, video_queue) = packet_queue();
-        let frame_queue = FrameQueue::new(17);
+        let frame_queue = FrameQueue::new(18);
 
         let (read_msg_tx, read_msg_rx) = unbounded();
 
@@ -252,6 +252,11 @@ impl Video {
         self.query_info.duration
     }
 
+    #[inline]
+    pub fn framerate(&self) -> f64 {
+        self.query_info.framerate.0 as f64 / self.query_info.framerate.1 as f64
+    }
+
     pub fn position(&self) -> Duration {
         Duration::from_secs_f64(self.last_pts as f64 * f64::from(self.query_info.time_base))
     }
@@ -314,6 +319,14 @@ impl Video {
 
 impl Drop for Video {
     fn drop(&mut self) {
+        if let Some(queued_frame) = self.queued_frame.take() {
+            self.frame_queue.release(queued_frame);
+        }
+
+        while let Some(frame) = self.frame_queue.try_next() {
+            self.frame_queue.release(frame);
+        }
+
         self.pbs.kill();
 
         if let Some(video_thread) = self.video_thread.take() {
