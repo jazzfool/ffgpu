@@ -143,6 +143,15 @@ fn main() {
     let mut text_buffer_2 =
         glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(12.0, 14.0));
 
+    text_buffer_2.set_text(
+        &mut font_system,
+        "[spacebar]: toggle pause\n[←→] arrow keys: seek (5s)\n[L]: toggle looping\n[>]: step one frame",
+        &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+        glyphon::Shaping::Basic,
+        None,
+    );
+    text_buffer_2.shape_until_scroll(&mut font_system, false);
+
     let window = &window;
     event_loop
         .run(move |event, target| match event {
@@ -188,19 +197,10 @@ fn main() {
                             wait,
                         ),
                         &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-                        glyphon::Shaping::Advanced,
+                        glyphon::Shaping::Basic,
                         None,
                     );
                     text_buffer_1.shape_until_scroll(&mut font_system, false);
-
-                    text_buffer_2.set_text(
-                        &mut font_system,
-                        "[spacebar]: toggle pause\n[←→] arrow keys: seek (5s)\n[L]: toggle looping\n[>]: step one frame",
-                        &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-                        glyphon::Shaping::Advanced,
-                        None,
-                    );
-                    text_buffer_2.shape_until_scroll(&mut font_system, false);
 
                     text_viewport.update(
                         &queue,
@@ -221,11 +221,11 @@ fn main() {
                                     buffer: &text_buffer_1,
                                     left: 10.0,
                                     top: 10.0,
-                                    scale: 1.0,
+                                    scale: window.scale_factor() as _,
                                     bounds: glyphon::TextBounds {
                                         left: 10,
                                         top: 10,
-                                        right: 140,
+                                        right: (140. * window.scale_factor()) as _,
                                         bottom: i32::MAX,
                                     },
                                     default_color: glyphon::Color::rgb(255, 255, 255),
@@ -233,9 +233,9 @@ fn main() {
                                 },
                                 glyphon::TextArea {
                                     buffer: &text_buffer_2,
-                                    left: 150.0,
+                                    left: (150.0 * window.scale_factor()) as _,
                                     top: 10.0,
-                                    scale: 1.0,
+                                    scale: window.scale_factor() as _,
                                     bounds: Default::default(),
                                     default_color: glyphon::Color::rgb(255, 255, 255),
                                     custom_glyphs: &[],
