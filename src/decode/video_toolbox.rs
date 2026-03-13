@@ -351,11 +351,11 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
         queue: &wgpu::Queue,
         _encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    ) -> Option<&wgpu::BindGroup> {
+    ) {
         unsafe {
             let frame = frame.as_mut();
             if frame.data[3].is_null() {
-                return None;
+                return;
             }
 
             assert_eq!(
@@ -398,19 +398,20 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                             ))
                         }
                     });
-
-            let bg0 = match imported_texture {
-                ImportedTexture::CVMetalTexture(imported_texture) => {
-                    imported_texture.import_cv_buffer(device, queue, pixel_buffer);
-                    &imported_texture.bg0
-                }
-                ImportedTexture::PlanarCopy(imported_texture) => {
-                    imported_texture.import_cv_buffer(queue, pixel_buffer);
-                    &imported_texture.bg0
-                }
-            };
-
-            Some(bg0)
         }
+    }
+
+    fn bind_group(&self) -> Option<&wgpu::BindGroup> {
+        let bg0 = match self.imported_texture.as_ref()? {
+            ImportedTexture::CVMetalTexture(imported_texture) => {
+                imported_texture.import_cv_buffer(device, queue, pixel_buffer);
+                &imported_texture.bg0
+            }
+            ImportedTexture::PlanarCopy(imported_texture) => {
+                imported_texture.import_cv_buffer(queue, pixel_buffer);
+                &imported_texture.bg0
+            }
+        };
+        Some(bg0)
     }
 }

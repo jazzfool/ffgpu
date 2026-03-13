@@ -441,7 +441,7 @@ impl HardwareDecoder for VAAPIHardwareDecoder {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    ) -> Option<&wgpu::BindGroup> {
+    ) {
         unsafe {
             let frame_ref = frame.as_ref();
 
@@ -475,16 +475,18 @@ impl HardwareDecoder for VAAPIHardwareDecoder {
             };
 
             if force_planar_copy {
-                self.imported = Some(ImportedTexture::PlanarCopy(CopiedTexture::new(
-                    device, layout, frame,
-                )));
-                return None;
+                let mut imported = CopiedTexture::new(device, layout, frame);
+                imported.import_frame(queue, frame);
+                self.imported = Some(ImportedTexture::PlanarCopy(imported));
+                return;
             }
-
-            self.imported.as_ref().map(|imported| match imported {
-                ImportedTexture::VulkanDRM(imported) => &imported.bg0,
-                ImportedTexture::PlanarCopy(imported) => &imported.bg0,
-            })
         }
+    }
+
+    fn bind_group(&self) -> Option<&wgpu::BindGroup> {
+        self.imported.as_ref().map(|imported| match imported {
+            ImportedTexture::VulkanDRM(imported) => &imported.bg0,
+            ImportedTexture::PlanarCopy(imported) => &imported.bg0,
+        })
     }
 }

@@ -31,7 +31,8 @@ pub(crate) trait HardwareDecoder {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    ) -> Option<&wgpu::BindGroup>;
+    );
+    fn bind_group(&self) -> Option<&wgpu::BindGroup>;
 }
 
 #[cfg(target_os = "windows")]
@@ -117,7 +118,7 @@ impl FrameDecoder {
         encoder: &mut wgpu::CommandEncoder,
         frame: &ffn::Frame,
     ) {
-        let bg0 = unsafe {
+        unsafe {
             self.hwdec.import_frame(
                 NonNull::new_unchecked(frame.as_ptr() as *mut _),
                 instance,
@@ -128,7 +129,13 @@ impl FrameDecoder {
                 &self.bg0_layout,
             )
         };
-        let Some(bg0) = bg0 else { return };
+        self.copy_to_rgb(encoder);
+    }
+
+    pub fn copy_to_rgb(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(bg0) = self.hwdec.bind_group() else {
+            return;
+        };
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,

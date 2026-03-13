@@ -10,6 +10,7 @@ use crate::{
 use crossbeam_channel::{Sender, unbounded};
 use ffmpeg_next::sys as ff;
 use std::{
+    ops::Add,
     path::Path,
     sync::{Arc, atomic::Ordering},
     thread::JoinHandle,
@@ -44,6 +45,7 @@ pub struct Video {
     last_pts: i64,
     last_serial: u32,
     queued_frame: Option<Frame>,
+    step_needs_copy: u8,
 }
 
 impl Video {
@@ -112,6 +114,7 @@ impl Video {
             last_pts: 0,
             last_serial: 0,
             queued_frame: None,
+            step_needs_copy: 0,
         })
     }
 
@@ -188,6 +191,7 @@ impl Video {
         };
 
         if self.pbs.play_state() == PlayState::Step {
+            self.step_needs_copy = self.step_needs_copy.add(4).min(16);
             self.pbs
                 .play_state
                 .store(PlayState::Paused as _, Ordering::Relaxed);
@@ -196,8 +200,27 @@ impl Video {
         true
     }
 
+    fn flush_frames(&mut self) {
+        if let Some(queued_frame) = self.queued_frame.take() {
+            self.frame_queue.release(queued_frame);
+        }
+
+        while let Some(frame) = self.frame_queue.try_next() {
+            self.frame_queue.release(frame);
+        }
+    }
+
     pub fn update(&mut self, encoder: &mut wgpu::CommandEncoder) -> Duration {
         let play_state = self.pbs.play_state();
+
+        if self.step_needs_copy > 0 {
+            // NOTE: this is a bit of a hack;
+            // on certain backends (namely D3D11VA) we have no way of syncing the D3D11 frame copy with the wgpu YUV->RGB copy.
+            // (well, of course it is possible, but wgpu doesn't enable the necessary device extensions...)
+            // to counteract this, when stepping a frame (e.g., during accurate seek while paused), we perform the YUV->RGB copy a few more times after the seek.
+            self.step_needs_copy -= 1;
+            self.frame_decoder.copy_to_rgb(encoder);
+        }
 
         if self.frame_queue.queued_len() == 0
             && self.pbs.is_eof.load(Ordering::SeqCst)
@@ -269,13 +292,7 @@ impl Video {
             log::error!("failed to send seek message: {}", error);
         }
 
-        if let Some(queued_frame) = self.queued_frame.take() {
-            self.frame_queue.release(queued_frame);
-        }
-
-        while let Some(frame) = self.frame_queue.try_next() {
-            self.frame_queue.release(frame);
-        }
+        self.flush_frames();
 
         match mode {
             SeekMode::Accurate => {
@@ -319,13 +336,7 @@ impl Video {
 
 impl Drop for Video {
     fn drop(&mut self) {
-        if let Some(queued_frame) = self.queued_frame.take() {
-            self.frame_queue.release(queued_frame);
-        }
-
-        while let Some(frame) = self.frame_queue.try_next() {
-            self.frame_queue.release(frame);
-        }
+        self.flush_frames();
 
         self.pbs.kill();
 

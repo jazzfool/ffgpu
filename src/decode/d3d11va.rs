@@ -302,7 +302,8 @@ impl ImportedTexture {
 
     unsafe fn on_copy(&self, queue: &wgpu::Queue, d3d11_device: &D3D11::ID3D11Device) {
         match &self.destination {
-            TextureDestination::ExternalNV12 => {} /* do nothing - the changes to the shared D3D11 texture will be visible in the wgpu texture */,
+            /* do nothing - the changes to the shared D3D11 texture will be visible in the wgpu texture */
+            TextureDestination::ExternalNV12 => {}
             TextureDestination::PlanarCopy {
                 y_texture,
                 uv_texture,
@@ -393,7 +394,8 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
         unsafe {
             let device_ctx = hwctx.as_ref().data as *mut ff::AVHWDeviceContext;
             let d3d11_ctx = (*device_ctx).hwctx as *mut AVD3D11VADeviceContext;
-            let d3d11_device = ManuallyDrop::new(core::mem::transmute((*d3d11_ctx).device));
+            let d3d11_device: ManuallyDrop<D3D11::ID3D11Device> =
+                ManuallyDrop::new(core::mem::transmute((*d3d11_ctx).device));
 
             D3D11VAHardwareDecoder {
                 d3d11_ctx,
@@ -412,11 +414,11 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
         queue: &wgpu::Queue,
         _encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    ) -> Option<&wgpu::BindGroup> {
+    ) {
         unsafe {
             let frame = frame.as_ref();
             if frame.data[0].is_null() {
-                return None;
+                return;
             }
 
             assert_eq!(
@@ -452,7 +454,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                         }
                     });
 
-            if let TextureDestination::ExternalNV12 = imported_texture.destination {
+            if let TextureDestination::ExternalNV12 = &imported_texture.destination {
                 imported_texture
                     .shared_texture
                     .cast::<Dxgi::IDXGIKeyedMutex>()
@@ -464,7 +466,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                 .GetImmediateContext()
                 .unwrap()
                 .CopySubresourceRegion(
-                    &*imported_texture.shared_texture,
+                    &imported_texture.shared_texture,
                     0,
                     0,
                     0,
@@ -486,8 +488,10 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
 
             // unlock ffmpeg mutex
             ((*self.d3d11_ctx).unlock)((*self.d3d11_ctx).lock_ctx);
-
-            Some(&imported_texture.bg0)
         }
+    }
+
+    fn bind_group(&self) -> Option<&wgpu::BindGroup> {
+        self.imported_texture.as_ref().map(|texture| &texture.bg0)
     }
 }

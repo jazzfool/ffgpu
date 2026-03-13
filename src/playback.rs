@@ -219,7 +219,7 @@ impl ReadThread {
                             self.video_tx
                                 .push_null(ffn::Packet::empty(), self.decoder.video_stream_index);
 
-                            if false && play_state == PlayState::Paused {
+                            if play_state == PlayState::Paused {
                                 self.pbs
                                     .play_state
                                     .store(PlayState::Step as _, Ordering::Relaxed);
@@ -333,8 +333,8 @@ impl FrameQueue {
     pub fn send(&self, frame: &mut ffn::Frame, serial: u32) {
         if let Ok(mut dst) = self.free_rx.recv() {
             unsafe {
+                ff::av_frame_unref(dst.frame.as_mut_ptr());
                 ff::av_frame_move_ref(dst.frame.as_mut_ptr(), frame.as_mut_ptr());
-                ff::av_frame_unref(frame.as_mut_ptr());
             }
             dst.serial = serial;
             self.queue_tx.send(dst).unwrap();
@@ -466,6 +466,8 @@ impl VideoThread {
                 };
 
                 if let Some(frame) = frame {
+                    prev_frame = None;
+
                     let mut step = false;
                     if let Some(pts) = frame.pts() {
                         self.pbs.current_pts.store(pts, Ordering::SeqCst);
