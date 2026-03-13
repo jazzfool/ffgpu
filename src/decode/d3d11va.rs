@@ -1,5 +1,8 @@
 use super::HardwareDecoder;
-use crate::context::pipeline_cache::PipelineCache;
+use crate::{
+    context::pipeline_cache::PipelineCache,
+    error::{Error, Result},
+};
 use ffmpeg_next::sys as ff;
 use std::{ffi::c_void, mem::ManuallyDrop, ptr::NonNull};
 use windows::{
@@ -46,17 +49,17 @@ impl ImportedTexture {
         layout: &wgpu::BindGroupLayout,
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
-    ) -> Self {
+    ) -> Result<Self> {
         unsafe {
             let (shared_texture, desc, handle) =
-                ImportedTexture::create_shared_texture(d3d11_device, desc);
-            let texture = ImportedTexture::import_handle_d3d12(device, &desc, handle);
+                ImportedTexture::create_shared_texture(d3d11_device, desc)?;
+            let texture = ImportedTexture::import_handle_d3d12(device, &desc, handle)?;
             let bg0 = PipelineCache::create_nv12_bind_group(device, &texture, layout);
-            ImportedTexture {
+            Ok(ImportedTexture {
                 shared_texture,
                 destination: TextureDestination::ExternalNV12,
                 bg0,
-            }
+            })
         }
     }
 
@@ -65,17 +68,17 @@ impl ImportedTexture {
         layout: &wgpu::BindGroupLayout,
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
-    ) -> Self {
+    ) -> Result<Self> {
         unsafe {
             let (shared_texture, desc, handle) =
-                ImportedTexture::create_shared_texture(d3d11_device, desc);
-            let texture = ImportedTexture::import_handle_vulkan(device, &desc, handle);
+                ImportedTexture::create_shared_texture(d3d11_device, desc)?;
+            let texture = ImportedTexture::import_handle_vulkan(device, &desc, handle)?;
             let bg0 = PipelineCache::create_nv12_bind_group(device, &texture, layout);
-            ImportedTexture {
+            Ok(ImportedTexture {
                 shared_texture,
                 destination: TextureDestination::ExternalNV12,
                 bg0,
-            }
+            })
         }
     }
 
@@ -84,27 +87,28 @@ impl ImportedTexture {
         layout: &wgpu::BindGroupLayout,
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
-    ) -> Self {
+    ) -> Result<Self> {
         unsafe {
-            let (shared_texture, desc) = ImportedTexture::create_mapped_texture(d3d11_device, desc);
+            let (shared_texture, desc) =
+                ImportedTexture::create_mapped_texture(d3d11_device, desc)?;
             let (y_texture, uv_texture) = ImportedTexture::create_planar_textures(device, &desc);
             let bg0 =
                 PipelineCache::create_planar_bind_group(device, &y_texture, &uv_texture, layout);
-            ImportedTexture {
+            Ok(ImportedTexture {
                 shared_texture,
                 destination: TextureDestination::PlanarCopy {
                     y_texture,
                     uv_texture,
                 },
                 bg0,
-            }
+            })
         }
     }
 
     unsafe fn create_shared_texture(
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
-    ) -> (D3D11::ID3D11Texture2D, D3D11::D3D11_TEXTURE2D_DESC, HANDLE) {
+    ) -> Result<(D3D11::ID3D11Texture2D, D3D11::D3D11_TEXTURE2D_DESC, HANDLE)> {
         unsafe {
             let texture_desc = D3D11::D3D11_TEXTURE2D_DESC {
                 Width: desc.Width,
@@ -125,22 +129,22 @@ impl ImportedTexture {
             let mut texture = None;
             d3d11_device
                 .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                .unwrap();
+                .map_err(|_| Error::TextureShare)?;
             let Some(texture) = texture else { panic!() };
 
             let dxgi_resource = texture.cast::<Dxgi::IDXGIResource1>().unwrap();
             let handle = dxgi_resource
                 .CreateSharedHandle(None, Dxgi::DXGI_SHARED_RESOURCE_READ.0, None)
-                .unwrap();
+                .map_err(|_| Error::TextureShare)?;
 
-            (texture, texture_desc, handle)
+            Ok((texture, texture_desc, handle))
         }
     }
 
     unsafe fn create_mapped_texture(
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
-    ) -> (D3D11::ID3D11Texture2D, D3D11::D3D11_TEXTURE2D_DESC) {
+    ) -> Result<(D3D11::ID3D11Texture2D, D3D11::D3D11_TEXTURE2D_DESC)> {
         unsafe {
             let texture_desc = D3D11::D3D11_TEXTURE2D_DESC {
                 Width: desc.Width,
@@ -160,10 +164,10 @@ impl ImportedTexture {
             let mut texture = None;
             d3d11_device
                 .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                .unwrap();
+                .map_err(|_| Error::TextureShare)?;
             let Some(texture) = texture else { panic!() };
 
-            (texture, texture_desc)
+            Ok((texture, texture_desc))
         }
     }
 
@@ -171,16 +175,16 @@ impl ImportedTexture {
         device: &wgpu::Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
         handle: HANDLE,
-    ) -> wgpu::Texture {
+    ) -> Result<wgpu::Texture> {
         unsafe {
             let hal_device = device.as_hal::<wgpu::hal::dx12::Api>().unwrap();
             let mut d3d12_texture: Option<D3D12::ID3D12Resource> = None;
             hal_device
                 .raw_device()
                 .OpenSharedHandle(handle, &mut d3d12_texture)
-                .unwrap();
+                .map_err(|_| Error::TextureShare)?;
             let Some(d3d12_texture) = d3d12_texture else {
-                panic!()
+                return Err(Error::TextureShare);
             };
             let hal_texture = wgpu::hal::dx12::Device::texture_from_raw(
                 d3d12_texture,
@@ -195,7 +199,7 @@ impl ImportedTexture {
                 1,
             );
 
-            device.create_texture_from_hal::<wgpu::hal::dx12::Api>(
+            Ok(device.create_texture_from_hal::<wgpu::hal::dx12::Api>(
                 hal_texture,
                 &wgpu::TextureDescriptor {
                     label: None,
@@ -211,7 +215,7 @@ impl ImportedTexture {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[wgpu::TextureFormat::NV12],
                 },
-            )
+            ))
         }
     }
 
@@ -219,7 +223,7 @@ impl ImportedTexture {
         device: &wgpu::Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
         handle: HANDLE,
-    ) -> wgpu::Texture {
+    ) -> Result<wgpu::Texture> {
         unsafe {
             let hal_device = device.as_hal::<wgpu::hal::vulkan::Api>().unwrap();
             let hal_texture = hal_device
@@ -241,9 +245,9 @@ impl ImportedTexture {
                         view_formats: vec![],
                     },
                 )
-                .unwrap();
+                .map_err(|_| Error::TextureShare)?;
 
-            device.create_texture_from_hal::<wgpu::hal::vulkan::Api>(
+            Ok(device.create_texture_from_hal::<wgpu::hal::vulkan::Api>(
                 hal_texture,
                 &wgpu::TextureDescriptor {
                     label: None,
@@ -259,7 +263,7 @@ impl ImportedTexture {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[wgpu::TextureFormat::NV12],
                 },
-            )
+            ))
         }
     }
 
@@ -381,6 +385,25 @@ impl ImportedTexture {
     }
 }
 
+fn acquire_ffmpeg_lock(
+    lock: unsafe extern "C" fn(*mut c_void),
+    unlock: unsafe extern "C" fn(*mut c_void),
+    lock_ctx: *mut c_void,
+) -> impl Drop {
+    struct Guard(unsafe extern "C" fn(*mut c_void), *mut c_void);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            unsafe {
+                (self.0)(self.1);
+            }
+        }
+    }
+    unsafe {
+        (lock)(lock_ctx);
+    }
+    Guard(unlock, lock_ctx)
+}
+
 pub struct D3D11VAHardwareDecoder {
     d3d11_ctx: *mut AVD3D11VADeviceContext,
     d3d11_device: ManuallyDrop<D3D11::ID3D11Device>,
@@ -390,18 +413,18 @@ pub struct D3D11VAHardwareDecoder {
 impl HardwareDecoder for D3D11VAHardwareDecoder {
     const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA;
 
-    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Self {
+    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Result<Self> {
         unsafe {
             let device_ctx = hwctx.as_ref().data as *mut ff::AVHWDeviceContext;
             let d3d11_ctx = (*device_ctx).hwctx as *mut AVD3D11VADeviceContext;
             let d3d11_device: ManuallyDrop<D3D11::ID3D11Device> =
                 ManuallyDrop::new(core::mem::transmute((*d3d11_ctx).device));
 
-            D3D11VAHardwareDecoder {
+            Ok(D3D11VAHardwareDecoder {
                 d3d11_ctx,
                 d3d11_device,
                 imported_texture: None,
-            }
+            })
         }
     }
 
@@ -414,11 +437,11 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
         queue: &wgpu::Queue,
         _encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    ) {
+    ) -> Result<()> {
         unsafe {
             let frame = frame.as_ref();
             if frame.data[0].is_null() {
-                return;
+                return Err(Error::InvalidFrame);
             }
 
             assert_eq!(
@@ -434,33 +457,38 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
             d3d11_texture.GetDesc(&mut desc);
 
             // lock ffmpeg d3d11 context mutex
-            ((*self.d3d11_ctx).lock)((*self.d3d11_ctx).lock_ctx);
+            let d3d11_lock = acquire_ffmpeg_lock(
+                (*self.d3d11_ctx).lock,
+                (*self.d3d11_ctx).unlock,
+                (*self.d3d11_ctx).lock_ctx,
+            );
 
-            let imported_texture =
-                self.imported_texture
-                    .get_or_insert_with(|| match adapter.get_info().backend {
-                        wgpu::Backend::Vulkan => {
-                            ImportedTexture::new_vulkan(device, layout, &self.d3d11_device, &desc)
-                        }
-                        wgpu::Backend::Dx12 => {
-                            ImportedTexture::new_d3d12(device, layout, &self.d3d11_device, &desc)
-                        }
-                        _ => {
-                            log::warn!(
-                                "unsupported zero-copy WGPU backend (must be Vulkan or DX12)"
-                            );
-                            log::warn!("using CPU frame copies");
-                            ImportedTexture::new_cpu(device, layout, &self.d3d11_device, &desc)
-                        }
-                    });
+            let imported_texture = if let Some(imported_texture) = &self.imported_texture {
+                imported_texture
+            } else {
+                let imported_texture = match adapter.get_info().backend {
+                    wgpu::Backend::Vulkan => {
+                        ImportedTexture::new_vulkan(device, layout, &self.d3d11_device, &desc)?
+                    }
+                    wgpu::Backend::Dx12 => {
+                        ImportedTexture::new_d3d12(device, layout, &self.d3d11_device, &desc)?
+                    }
+                    _ => {
+                        log::warn!("unsupported zero-copy WGPU backend (must be Vulkan or DX12)");
+                        log::warn!("using CPU frame copies");
+                        ImportedTexture::new_cpu(device, layout, &self.d3d11_device, &desc)?
+                    }
+                };
+                self.imported_texture.insert(imported_texture)
+            };
 
             if let TextureDestination::ExternalNV12 = &imported_texture.destination {
                 imported_texture
                     .shared_texture
                     .cast::<Dxgi::IDXGIKeyedMutex>()
-                    .unwrap()
+                    .unwrap(/* texture created with SHARED_KEYEDMUTEX */)
                     .AcquireSync(0, u32::MAX)
-                    .unwrap();
+                    .map_err(|_| Error::Unknown)?;
             }
             self.d3d11_device
                 .GetImmediateContext()
@@ -479,15 +507,17 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                 imported_texture
                     .shared_texture
                     .cast::<Dxgi::IDXGIKeyedMutex>()
-                    .unwrap()
+                    .unwrap(/* texture created with SHARED_KEYEDMUTEX */)
                     .ReleaseSync(0)
-                    .unwrap();
+                    .map_err(|_| Error::Unknown)?;
             }
 
             imported_texture.on_copy(queue, &self.d3d11_device);
 
             // unlock ffmpeg mutex
-            ((*self.d3d11_ctx).unlock)((*self.d3d11_ctx).lock_ctx);
+            drop(d3d11_lock);
+
+            Ok(())
         }
     }
 

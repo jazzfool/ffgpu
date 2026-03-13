@@ -169,7 +169,7 @@ fn main() {
 
                     let mut encoder = device.create_command_encoder(&Default::default());
 
-                    let wait = video.update(&mut encoder);
+                    let wait = video.update(&mut encoder).expect("Video::update");
 
                     text_buffer_1.set_size(
                         &mut font_system,

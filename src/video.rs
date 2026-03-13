@@ -23,6 +23,12 @@ pub enum SeekMode {
     Accurate,
 }
 
+enum FrameResponse {
+    Continue,
+    Retry,
+    Requeue,
+}
+
 pub struct Video {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -127,15 +133,13 @@ impl Video {
         encoder: &mut wgpu::CommandEncoder,
         frame: &Frame,
         _queued_len: usize,
-        retry: &mut bool,
         wait_duration: &mut Duration,
-    ) -> bool {
+    ) -> Result<FrameResponse> {
         let time = unsafe { ff::av_gettime_relative() as f64 / 1000000.0 };
 
         if frame.serial != self.video_queue.serial.load(Ordering::SeqCst) {
             self.frame_timer = time;
-            *retry = true;
-            return true;
+            return Ok(FrameResponse::Retry);
         }
 
         let best_effort_timestamp = unsafe { (*frame.frame.as_ptr()).best_effort_timestamp };
@@ -162,7 +166,7 @@ impl Video {
 
         if time < self.frame_timer + delay {
             // too early
-            return false;
+            return Ok(FrameResponse::Requeue);
         }
 
         self.frame_timer += delay;
@@ -187,7 +191,7 @@ impl Video {
                 &self.queue,
                 encoder,
                 &frame.frame,
-            )
+            )?
         };
 
         if self.pbs.play_state() == PlayState::Step {
@@ -197,7 +201,7 @@ impl Video {
                 .store(PlayState::Paused as _, Ordering::Relaxed);
         }
 
-        true
+        Ok(FrameResponse::Continue)
     }
 
     fn flush_frames(&mut self) {
@@ -210,8 +214,12 @@ impl Video {
         }
     }
 
-    pub fn update(&mut self, encoder: &mut wgpu::CommandEncoder) -> Duration {
+    pub fn update(&mut self, encoder: &mut wgpu::CommandEncoder) -> Result<Duration> {
         let play_state = self.pbs.play_state();
+
+        if play_state == PlayState::Playing {
+            self.step_needs_copy = 0;
+        }
 
         if self.step_needs_copy > 0 {
             // NOTE: this is a bit of a hack;
@@ -232,7 +240,7 @@ impl Video {
         }
 
         if play_state == PlayState::Paused || self.frame_queue.queued_len() == 0 {
-            return Duration::from_millis(50);
+            return Ok(Duration::from_millis(50));
         }
 
         let mut duration = Duration::from_secs_f64(f64::from(self.query_info.framerate.invert()));
@@ -243,21 +251,26 @@ impl Video {
                 .take()
                 .or_else(|| self.frame_queue.try_next());
             if let Some(frame) = frame {
-                let mut retry = false;
-                let pop = self.update_frame(encoder, &frame, queued_len, &mut retry, &mut duration);
-                if !pop {
-                    self.queued_frame = Some(frame);
-                } else {
-                    self.frame_queue.release(frame);
-                }
-                if !retry {
-                    break;
+                let response = self.update_frame(encoder, &frame, queued_len, &mut duration)?;
+                match response {
+                    FrameResponse::Continue => {
+                        self.frame_queue.release(frame);
+                        break;
+                    }
+                    FrameResponse::Retry => {
+                        self.frame_queue.release(frame);
+                    }
+                    FrameResponse::Requeue => {
+                        self.queued_frame = Some(frame);
+                        break;
+                    }
                 }
             } else {
                 break;
             }
         }
-        duration
+
+        Ok(duration)
     }
 
     #[inline]

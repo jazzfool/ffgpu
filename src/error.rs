@@ -8,6 +8,8 @@ pub enum Error {
     InvalidStream,
     MissingCodec(&'static str),
     HardwareContext,
+    InvalidFrame,
+    TextureShare,
     Unknown,
 }
 
@@ -20,6 +22,8 @@ impl fmt::Display for Error {
                 write!(f, "failed to find codec {} for stream", codec_name)
             }
             Error::HardwareContext => f.write_str("hardware context error"),
+            Error::InvalidFrame => f.write_str("AVFrame contains invalid data"),
+            Error::TextureShare => f.write_str("failed to share texture with wgpu"),
             Error::Unknown => f.write_str("unknown error"),
         }
     }

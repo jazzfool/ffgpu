@@ -18,10 +18,10 @@ use std::{
     time::Duration,
 };
 
-pub(crate) trait HardwareDecoder {
+pub(crate) trait HardwareDecoder: Sized {
     const DEVICE_TYPE: ff::AVHWDeviceType;
 
-    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Self;
+    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Result<Self>;
     unsafe fn import_frame(
         &mut self,
         frame: NonNull<ff::AVFrame>,
@@ -31,7 +31,7 @@ pub(crate) trait HardwareDecoder {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    );
+    ) -> Result<()>;
     fn bind_group(&self) -> Option<&wgpu::BindGroup>;
 }
 
@@ -78,8 +78,8 @@ impl FrameDecoder {
         color_space: ffn::color::Space,
         width: u32,
         height: u32,
-    ) -> Self {
-        let hwdec = unsafe { NativeDecoder::new(hwctx) };
+    ) -> Result<Self> {
+        let hwdec = unsafe { NativeDecoder::new(hwctx)? };
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -100,13 +100,13 @@ impl FrameDecoder {
         let bg0_layout = pipeline_cache.bind_group_layout().clone();
         let pipeline = pipeline_cache.get(color_space).clone();
 
-        FrameDecoder {
+        Ok(FrameDecoder {
             hwdec,
             texture,
             texture_view,
             bg0_layout,
             pipeline,
-        }
+        })
     }
 
     pub unsafe fn decode_native_frame(
@@ -117,7 +117,7 @@ impl FrameDecoder {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frame: &ffn::Frame,
-    ) {
+    ) -> Result<()> {
         unsafe {
             self.hwdec.import_frame(
                 NonNull::new_unchecked(frame.as_ptr() as *mut _),
@@ -127,9 +127,10 @@ impl FrameDecoder {
                 queue,
                 encoder,
                 &self.bg0_layout,
-            )
+            )?
         };
         self.copy_to_rgb(encoder);
+        Ok(())
     }
 
     pub fn copy_to_rgb(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -266,7 +267,7 @@ impl Decoder {
             color_space,
             width as _,
             height as _,
-        );
+        )?;
 
         let query_info = QueryInfo {
             time_base: video_stream.time_base(),
