@@ -1,6 +1,6 @@
 use crate::{
     context::pipeline_cache::PipelineCache,
-    decode::{Decoder, FrameDecoder, QueryInfo},
+    decode::{FrameDecoder, Input, VideoDecoder, VideoInfo},
     error::Result,
     playback::{
         DecodeMessage, Frame, FrameQueue, PacketQueueMetadata, PlayState, PlaybackState,
@@ -41,7 +41,6 @@ pub struct Video {
     frame_queue: FrameQueue,
     read_thread: Option<JoinHandle<()>>,
     video_thread: Option<JoinHandle<()>>,
-    query_info: QueryInfo,
 
     read_messages: Sender<ReadMessage>,
     video_decode_messages: Sender<DecodeMessage>,
@@ -66,12 +65,13 @@ impl Video {
     where
         P: AsRef<Path> + ?Sized,
     {
-        let (stream_decoder, frame_decoder) = Decoder::new(&device, pipeline_cache, path)?;
-        let query_info = stream_decoder.query_info;
+        let mut input = Input::open(path)?;
 
-        let stream_decoder = Arc::new(stream_decoder);
+        let (video_decoder, frame_decoder) =
+            VideoDecoder::new(&mut input, &device, pipeline_cache)?;
 
         let pbs = Arc::new(PlaybackState::new());
+        *pbs.video_stream.write().expect("write video_stream") = video_decoder.info;
 
         let (video_tx, video_rx, video_queue) = packet_queue();
         let frame_queue = FrameQueue::new(18);
@@ -79,7 +79,7 @@ impl Video {
         let (read_msg_tx, read_msg_rx) = unbounded();
 
         let read_thread = ReadThread::new(
-            stream_decoder.clone(),
+            input,
             pbs.clone(),
             video_tx,
             frame_queue.clone(),
@@ -90,7 +90,7 @@ impl Video {
         let (video_decode_tx, video_decode_rx) = unbounded();
 
         let video_thread = VideoThread::new(
-            stream_decoder.clone(),
+            video_decoder,
             pbs.clone(),
             video_rx,
             frame_queue.clone(),
@@ -110,7 +110,6 @@ impl Video {
             frame_queue,
             read_thread: Some(read_thread),
             video_thread: Some(video_thread),
-            query_info,
 
             read_messages: read_msg_tx,
             video_decode_messages: video_decode_tx,
@@ -144,15 +143,17 @@ impl Video {
 
         let best_effort_timestamp = unsafe { (*frame.frame.as_ptr()).best_effort_timestamp };
 
+        let video_info = self.video_info();
+
         let duration = if frame.serial == self.last_serial {
-            (best_effort_timestamp as f64 * f64::from(self.query_info.time_base))
-                - (self.last_pts as f64 * f64::from(self.query_info.time_base))
+            (best_effort_timestamp as f64 * f64::from(video_info.time_base))
+                - (self.last_pts as f64 * f64::from(video_info.time_base))
         } else {
             0.0
         };
         let duration = if duration < 0.0 || duration > 3600.0 {
-            if self.query_info.framerate.0 > 0 && self.query_info.framerate.1 > 0 {
-                f64::from(self.query_info.framerate.invert())
+            if video_info.framerate.0 > 0 && video_info.framerate.1 > 0 {
+                f64::from(video_info.framerate.invert())
             } else {
                 0.0
             }
@@ -243,7 +244,9 @@ impl Video {
             return Ok(Duration::from_millis(50));
         }
 
-        let mut duration = Duration::from_secs_f64(f64::from(self.query_info.framerate.invert()));
+        let video_info = self.video_info();
+
+        let mut duration = Duration::from_secs_f64(f64::from(video_info.framerate.invert()));
         loop {
             let queued_len = self.frame_queue.queued_len();
             let frame = self
@@ -273,28 +276,37 @@ impl Video {
         Ok(duration)
     }
 
+    fn video_info(&self) -> VideoInfo {
+        self.pbs
+            .video_stream
+            .read()
+            .expect("read video_stream")
+            .clone()
+    }
+
     #[inline]
     pub fn width(&self) -> u32 {
-        self.query_info.width
+        self.video_info().width
     }
 
     #[inline]
     pub fn height(&self) -> u32 {
-        self.query_info.height
+        self.video_info().height
     }
 
     #[inline]
     pub fn duration(&self) -> Duration {
-        self.query_info.duration
+        self.video_info().duration
     }
 
     #[inline]
     pub fn framerate(&self) -> f64 {
-        self.query_info.framerate.0 as f64 / self.query_info.framerate.1 as f64
+        let video_info = self.video_info();
+        video_info.framerate.0 as f64 / video_info.framerate.1 as f64
     }
 
     pub fn position(&self) -> Duration {
-        Duration::from_secs_f64(self.last_pts as f64 * f64::from(self.query_info.time_base))
+        Duration::from_secs_f64(self.last_pts as f64 * f64::from(self.video_info().time_base))
     }
 
     pub fn seek(&mut self, position: Duration, mode: SeekMode) {

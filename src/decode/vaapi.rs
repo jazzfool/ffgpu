@@ -1,8 +1,8 @@
-use super::{HardwareDecoder, av_version};
-use crate::context::pipeline_cache::PipelineCache;
+use super::HardwareDecoder;
+use crate::{context::pipeline_cache::PipelineCache, error::Result};
 use ash::vk;
 use ffmpeg_next::sys as ff;
-use std::ptr::{NonNull, null_mut};
+use std::ptr::NonNull;
 
 struct VulkanDRMTexture {
     drm_frame: NonNull<ff::AVFrame>,
@@ -428,8 +428,8 @@ pub struct VAAPIHardwareDecoder {
 impl HardwareDecoder for VAAPIHardwareDecoder {
     const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI;
 
-    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Self {
-        VAAPIHardwareDecoder { imported: None }
+    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Result<Self> {
+        Ok(VAAPIHardwareDecoder { imported: None })
     }
 
     unsafe fn import_frame(
@@ -441,7 +441,7 @@ impl HardwareDecoder for VAAPIHardwareDecoder {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    ) {
+    ) -> Result<()> {
         unsafe {
             let frame_ref = frame.as_ref();
 
@@ -475,11 +475,14 @@ impl HardwareDecoder for VAAPIHardwareDecoder {
             };
 
             if force_planar_copy {
+                log::error!("vulkan DRM import failed");
+                log::warn!("using CPU frame copies");
                 let mut imported = CopiedTexture::new(device, layout, frame);
                 imported.import_frame(queue, frame);
                 self.imported = Some(ImportedTexture::PlanarCopy(imported));
-                return;
             }
+
+            Ok(())
         }
     }
 

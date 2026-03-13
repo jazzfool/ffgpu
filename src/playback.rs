@@ -1,10 +1,10 @@
-use crate::decode::Decoder;
+use crate::decode::{Input, VideoDecoder, VideoInfo};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use ffmpeg_next::{self as ffn, sys as ff};
 use std::{
     i64,
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
     },
     thread::JoinHandle,
@@ -26,6 +26,8 @@ pub(crate) struct PlaybackState {
     pub(crate) play_state: AtomicU8,
     pub(crate) is_eof: AtomicBool,
     pub(crate) current_pts: AtomicI64,
+
+    pub(crate) video_stream: RwLock<VideoInfo>,
 }
 
 impl PlaybackState {
@@ -35,6 +37,8 @@ impl PlaybackState {
             play_state: AtomicU8::new(PlayState::Playing as u8),
             is_eof: AtomicBool::new(false),
             current_pts: AtomicI64::new(0),
+
+            video_stream: RwLock::new(Default::default()),
         }
     }
 
@@ -145,7 +149,7 @@ pub(crate) enum ReadMessage {
 }
 
 pub(crate) struct ReadThread {
-    decoder: Arc<Decoder>,
+    input: Input,
     pbs: Arc<PlaybackState>,
     video_tx: PacketSender,
     frame_queue: FrameQueue,
@@ -154,14 +158,14 @@ pub(crate) struct ReadThread {
 
 impl ReadThread {
     pub fn new(
-        decoder: Arc<Decoder>,
+        input: Input,
         pbs: Arc<PlaybackState>,
         video_tx: PacketSender,
         frame_queue: FrameQueue,
         messages: Receiver<ReadMessage>,
     ) -> Self {
         ReadThread {
-            decoder,
+            input,
             pbs,
             video_tx,
             frame_queue,
@@ -171,14 +175,6 @@ impl ReadThread {
 
     fn run_thread(&mut self) {
         const MAX_QUEUE_SIZE: usize = 15 * 1024 * 1024;
-
-        let time_base = self.decoder.query_info.time_base;
-
-        let mut format_ctx = self
-            .decoder
-            .format_ctx
-            .lock()
-            .expect("lock AVFormatContext");
 
         while self.pbs.alive.load(Ordering::Relaxed) {
             let play_state = self.pbs.play_state();
@@ -195,13 +191,20 @@ impl ReadThread {
                 }
             }*/
 
+            let video_stream = self
+                .pbs
+                .video_stream
+                .read()
+                .expect("read video_stream")
+                .clone();
+
             while let Ok(message) = self.messages.try_recv() {
                 match message {
                     ReadMessage::SeekStream(ts) => {
                         if let Err(error) = {
                             let err = unsafe {
                                 ff::avformat_seek_file(
-                                    format_ctx.as_mut_ptr(),
+                                    self.input.format_ctx.as_mut_ptr(),
                                     -1,
                                     i64::MIN,
                                     ts,
@@ -217,7 +220,7 @@ impl ReadThread {
                             self.pbs.is_eof.store(false, Ordering::SeqCst);
                             self.video_tx.flush();
                             self.video_tx
-                                .push_null(ffn::Packet::empty(), self.decoder.video_stream_index);
+                                .push_null(ffn::Packet::empty(), video_stream.index);
 
                             if play_state == PlayState::Paused {
                                 self.pbs
@@ -232,7 +235,7 @@ impl ReadThread {
             if (self.video_tx.tx.len()/*+ self.audio_tx.packets.len()
             + self.subtitle_tx.packets.len()*/)
                 > MAX_QUEUE_SIZE
-                || self.video_tx.has_enough_packets(time_base)
+                || self.video_tx.has_enough_packets(video_stream.time_base)
             {
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
@@ -247,25 +250,25 @@ impl ReadThread {
             }
 
             let mut packet = ffn::Packet::empty();
-            match packet.read(&mut format_ctx) {
+            match packet.read(&mut self.input.format_ctx) {
                 Ok(_) => {
                     self.pbs.is_eof.store(false, Ordering::SeqCst);
                 }
                 Err(error) => {
                     if !is_eof
                         && (error == ffn::Error::Eof
-                            || unsafe { ff::avio_feof((*format_ctx.as_ptr()).pb) != 0 })
+                            || unsafe { ff::avio_feof((*self.input.format_ctx.as_ptr()).pb) != 0 })
                     {
                         // flush
                         self.video_tx
-                            .push_null(ffn::Packet::empty(), self.decoder.video_stream_index);
+                            .push_null(ffn::Packet::empty(), video_stream.index);
                         // self.audio_q.push_null();
                         // self.subtitle_q.push_null();
 
                         self.pbs.is_eof.store(true, Ordering::SeqCst);
                     }
 
-                    let avio_error = unsafe { (*(*format_ctx.as_ptr()).pb).error };
+                    let avio_error = unsafe { (*(*self.input.format_ctx.as_ptr()).pb).error };
                     if avio_error != 0 {
                         log::error!("AVIOContext error {}", avio_error);
                     }
@@ -276,7 +279,7 @@ impl ReadThread {
             }
 
             let stream_index = packet.stream();
-            if stream_index == self.decoder.video_stream_index {
+            if stream_index == video_stream.index {
                 self.video_tx.push(packet);
             }
 
@@ -363,7 +366,7 @@ pub(crate) enum DecodeMessage {
 }
 
 pub(crate) struct VideoThread {
-    decoder: Arc<Decoder>,
+    decoder: VideoDecoder,
     pbs: Arc<PlaybackState>,
     video_rx: PacketReceiver,
     frame_queue: FrameQueue,
@@ -372,7 +375,7 @@ pub(crate) struct VideoThread {
 
 impl VideoThread {
     pub fn new(
-        decoder: Arc<Decoder>,
+        decoder: VideoDecoder,
         pbs: Arc<PlaybackState>,
         video_rx: PacketReceiver,
         frame_queue: FrameQueue,
@@ -391,12 +394,6 @@ impl VideoThread {
         let mut packet_serial = 0;
 
         let mut frame = unsafe { ffn::Frame::empty() };
-
-        let mut decoder_ctx = self
-            .decoder
-            .decoder_ctx
-            .lock()
-            .expect("lock AVCodecContext");
 
         let mut skip_to_ts = None;
 
@@ -417,13 +414,13 @@ impl VideoThread {
                     continue;
                 }
 
-                let frame = match decoder_ctx.receive_frame(&mut frame) {
+                let frame = match self.decoder.decoder_ctx.receive_frame(&mut frame) {
                     Ok(_) => {
                         if let Some(pts) = frame.pts() {
                             let av_pts = unsafe {
                                 ff::av_rescale_q(
                                     pts,
-                                    self.decoder.query_info.time_base.into(),
+                                    self.decoder.info.time_base.into(),
                                     ff::AV_TIME_BASE_Q,
                                 )
                             };
@@ -455,7 +452,7 @@ impl VideoThread {
                             };
                             Some(&mut frame)
                         } else {
-                            decoder_ctx.flush();
+                            self.decoder.decoder_ctx.flush();
                             break;
                         }
                     }
@@ -496,7 +493,7 @@ impl VideoThread {
                 };
 
                 if packet_serial != packet.serial {
-                    decoder_ctx.flush();
+                    self.decoder.decoder_ctx.flush();
                     packet_serial = packet.serial;
                 }
 
@@ -505,7 +502,7 @@ impl VideoThread {
                 }
             };
 
-            if let Err(error) = decoder_ctx.send_packet(&packet.packet) {
+            if let Err(error) = self.decoder.decoder_ctx.send_packet(&packet.packet) {
                 log::error!("failed to send packet: {}", error);
             }
         }

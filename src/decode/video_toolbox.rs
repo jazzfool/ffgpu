@@ -1,4 +1,8 @@
-use crate::{context::pipeline_cache::PipelineCache, decode::HardwareDecoder};
+use crate::{
+    context::pipeline_cache::PipelineCache,
+    decode::HardwareDecoder,
+    error::{Error, Result},
+};
 use ffmpeg_next::sys as ff;
 use metal::foreign_types::ForeignType;
 use objc2_core_video as cv;
@@ -336,10 +340,10 @@ pub struct VideoToolboxHardwareDecoder {
 impl HardwareDecoder for VideoToolboxHardwareDecoder {
     const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
 
-    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Self {
-        VideoToolboxHardwareDecoder {
+    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Result<Self> {
+        Ok(VideoToolboxHardwareDecoder {
             imported_texture: None,
-        }
+        })
     }
 
     unsafe fn import_frame(
@@ -351,11 +355,11 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
         queue: &wgpu::Queue,
         _encoder: &mut wgpu::CommandEncoder,
         layout: &wgpu::BindGroupLayout,
-    ) {
+    ) -> Result<()> {
         unsafe {
             let frame = frame.as_mut();
             if frame.data[3].is_null() {
-                return;
+                return Err(Error::InvalidFrame);
             }
 
             assert_eq!(
@@ -377,7 +381,7 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                                 .cast::<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>(
                                 )
                                 .as_ref()
-                                .unwrap();
+                                .unwrap(/* invariant */);
                             ImportedTexture::CVMetalTexture(ImportedCVMetalTexture::new(
                                 device,
                                 layout,
@@ -398,19 +402,24 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                             ))
                         }
                     });
+
+            match imported_texture {
+                ImportedTexture::CVMetalTexture(imported_texture) => {
+                    imported_texture.import_cv_buffer(device, queue, pixel_buffer);
+                }
+                ImportedTexture::PlanarCopy(imported_texture) => {
+                    imported_texture.import_cv_buffer(queue, pixel_buffer);
+                }
+            }
+
+            Ok(())
         }
     }
 
     fn bind_group(&self) -> Option<&wgpu::BindGroup> {
         let bg0 = match self.imported_texture.as_ref()? {
-            ImportedTexture::CVMetalTexture(imported_texture) => {
-                imported_texture.import_cv_buffer(device, queue, pixel_buffer);
-                &imported_texture.bg0
-            }
-            ImportedTexture::PlanarCopy(imported_texture) => {
-                imported_texture.import_cv_buffer(queue, pixel_buffer);
-                &imported_texture.bg0
-            }
+            ImportedTexture::CVMetalTexture(imported_texture) => &imported_texture.bg0,
+            ImportedTexture::PlanarCopy(imported_texture) => &imported_texture.bg0,
         };
         Some(bg0)
     }

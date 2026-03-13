@@ -14,7 +14,6 @@ use std::{
     path::Path,
     pin::Pin,
     ptr::{NonNull, null_mut},
-    sync::Mutex,
     time::Duration,
 };
 
@@ -165,7 +164,8 @@ impl FrameDecoder {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct QueryInfo {
+pub(crate) struct VideoInfo {
+    pub index: usize,
     pub time_base: ffn::Rational,
     pub framerate: ffn::Rational,
     pub width: u32,
@@ -173,33 +173,53 @@ pub(crate) struct QueryInfo {
     pub duration: Duration,
 }
 
+impl Default for VideoInfo {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            time_base: ffn::Rational::new(0, 1),
+            framerate: ffn::Rational::new(0, 1),
+            width: 0,
+            height: 0,
+            duration: Duration::ZERO,
+        }
+    }
+}
+
 struct DecoderData {
     hw_pixel_format: ff::AVPixelFormat,
 }
 
-pub(crate) struct Decoder {
-    pub format_ctx: Mutex<ffn::format::context::Input>,
-    pub decoder_ctx: Mutex<ffn::decoder::Video>,
-    pub hwctx: NonNull<ff::AVBufferRef>,
-    pub video_stream_index: usize,
-    pub query_info: QueryInfo,
-    _decoder_data: Pin<Box<DecoderData>>,
+pub(crate) struct Input {
+    pub format_ctx: ffn::format::context::Input,
 }
 
-impl Decoder {
-    pub fn new<P>(
-        device: &wgpu::Device,
-        pipeline_cache: &mut PipelineCache,
-        path: &P,
-    ) -> Result<(Self, FrameDecoder)>
+impl Input {
+    pub fn open<P>(path: &P) -> Result<Self>
     where
         P: AsRef<Path> + ?Sized,
     {
         ffn::init()?;
-
         let format_ctx = ffn::format::input(path)?;
+        Ok(Input { format_ctx })
+    }
+}
 
-        let video_stream = format_ctx
+pub(crate) struct VideoDecoder {
+    pub decoder_ctx: ffn::decoder::Video,
+    pub hwctx: NonNull<ff::AVBufferRef>,
+    pub info: VideoInfo,
+    _decoder_data: Pin<Box<DecoderData>>,
+}
+
+impl VideoDecoder {
+    pub fn new(
+        input: &mut Input,
+        device: &wgpu::Device,
+        pipeline_cache: &mut PipelineCache,
+    ) -> Result<(Self, FrameDecoder)> {
+        let video_stream = input
+            .format_ctx
             .streams()
             .best(ffn::media::Type::Video)
             .ok_or(Error::InvalidStream)?;
@@ -269,7 +289,8 @@ impl Decoder {
             height as _,
         )?;
 
-        let query_info = QueryInfo {
+        let info = VideoInfo {
+            index: video_stream_index,
             time_base: video_stream.time_base(),
             framerate: video_stream.avg_frame_rate(),
             width: width,
@@ -281,12 +302,10 @@ impl Decoder {
         };
 
         Ok((
-            Decoder {
-                format_ctx: Mutex::new(format_ctx),
-                decoder_ctx: Mutex::new(decoder_ctx),
+            VideoDecoder {
+                decoder_ctx,
                 hwctx,
-                video_stream_index,
-                query_info,
+                info,
                 _decoder_data: decoder_data,
             },
             frame_decoder,
@@ -294,7 +313,7 @@ impl Decoder {
     }
 }
 
-impl Drop for Decoder {
+impl Drop for VideoDecoder {
     fn drop(&mut self) {
         unsafe {
             ff::av_buffer_unref(&mut self.hwctx.as_ptr());
@@ -302,5 +321,5 @@ impl Drop for Decoder {
     }
 }
 
-unsafe impl Send for Decoder {}
-unsafe impl Sync for Decoder {}
+unsafe impl Send for VideoDecoder {}
+unsafe impl Sync for VideoDecoder {}
