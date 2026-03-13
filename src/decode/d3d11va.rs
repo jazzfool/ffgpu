@@ -524,4 +524,16 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
     fn bind_group(&self) -> Option<&wgpu::BindGroup> {
         self.imported_texture.as_ref().map(|texture| &texture.bg0)
     }
+
+    fn name(&self) -> &'static str {
+        match &self
+            .imported_texture
+            .as_ref()
+            .map(|imported| &imported.destination)
+        {
+            Some(TextureDestination::ExternalNV12) => "D3D11VA zero-copy",
+            Some(TextureDestination::PlanarCopy { .. }) => "D3D11VA software copy",
+            None => "D3D11VA",
+        }
+    }
 }

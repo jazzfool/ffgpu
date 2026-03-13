@@ -423,4 +423,12 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
         };
         Some(bg0)
     }
+
+    fn name(&self) -> &'static str {
+        match &self.imported_texture {
+            Some(ImportedTexture::CVMetalTexture(_)) => "VideoToolbox CVMetalTexture",
+            Some(ImportedTexture::PlanarCopy(_)) => "VideoToolbox software copy",
+            None => "VideoToolbox",
+        }
+    }
 }

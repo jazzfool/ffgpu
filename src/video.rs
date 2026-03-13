@@ -1,6 +1,6 @@
 use crate::{
     context::pipeline_cache::PipelineCache,
-    decode::{FrameDecoder, Input, VideoDecoder, VideoInfo},
+    decode::{FrameDecoder, HardwareDecoder, Input, VideoDecoder, VideoInfo},
     error::Result,
     playback::{
         DecodeMessage, Frame, FrameQueue, PacketQueueMetadata, PlayState, PlaybackState,
@@ -303,6 +303,11 @@ impl Video {
     pub fn framerate(&self) -> f64 {
         let video_info = self.video_info();
         video_info.framerate.0 as f64 / video_info.framerate.1 as f64
+    }
+
+    #[inline]
+    pub fn decoder_name(&self) -> &'static str {
+        self.frame_decoder.hwdec.name()
     }
 
     pub fn position(&self) -> Duration {

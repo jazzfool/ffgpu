@@ -185,10 +185,11 @@ fn main() {
                     text_buffer_1.set_text(
                         &mut font_system,
                         &format!(
-                            "test.mp4\n{}x{}@{:.02}fps\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\ndelay {:#?}",
+                            "test.mp4\n{}x{}@{:.02}fps\n{}\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\ndelay {:#?}",
                             video.width(),
                             video.height(),
                             video.framerate(),
+                            video.decoder_name(),
                             if video.paused() { "paused" } else { "playing" },
                             if video.looping() { "on" } else { "off" },
                             video.position().as_secs() / 60,
@@ -225,7 +226,7 @@ fn main() {
                                     bounds: glyphon::TextBounds {
                                         left: 10,
                                         top: 10,
-                                        right: (140. * window.scale_factor()) as _,
+                                        right: (190. * window.scale_factor()) as _,
                                         bottom: i32::MAX,
                                     },
                                     default_color: glyphon::Color::rgb(255, 255, 255),
@@ -233,7 +234,7 @@ fn main() {
                                 },
                                 glyphon::TextArea {
                                     buffer: &text_buffer_2,
-                                    left: (150.0 * window.scale_factor()) as _,
+                                    left: (200.0 * window.scale_factor()) as _,
                                     top: 10.0,
                                     scale: window.scale_factor() as _,
                                     bounds: Default::default(),

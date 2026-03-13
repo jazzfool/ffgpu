@@ -492,4 +492,12 @@ impl HardwareDecoder for VAAPIHardwareDecoder {
             ImportedTexture::PlanarCopy(imported) => &imported.bg0,
         })
     }
+
+    fn name(&self) -> &'static str {
+        match &self.imported {
+            Some(ImportedTexture::VulkanDRM(_)) => "VA-API Vulkan DMA",
+            Some(ImportedTexture::PlanarCopy(_)) => "VA-API software copy",
+            None => "VA-API",
+        }
+    }
 }

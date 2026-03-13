@@ -32,6 +32,7 @@ pub(crate) trait HardwareDecoder: Sized {
         layout: &wgpu::BindGroupLayout,
     ) -> Result<()>;
     fn bind_group(&self) -> Option<&wgpu::BindGroup>;
+    fn name(&self) -> &'static str;
 }
 
 #[cfg(target_os = "windows")]
@@ -62,7 +63,7 @@ unsafe extern "C" fn get_hw_format(
 }
 
 pub struct FrameDecoder {
-    hwdec: NativeDecoder,
+    pub(crate) hwdec: NativeDecoder,
     texture: wgpu::Texture,
     texture_view: wgpu::TextureView,
     bg0_layout: wgpu::BindGroupLayout,
