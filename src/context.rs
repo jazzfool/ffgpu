@@ -1,6 +1,6 @@
 pub(crate) mod pipeline_cache;
 
-use crate::{error::Result, video::Video};
+use crate::{decode::audio::AudioSink, error::Result, video::Video};
 use pipeline_cache::PipelineCache;
 use std::path::Path;
 
@@ -35,7 +35,7 @@ impl Context {
         }
     }
 
-    pub fn create_video<P>(&mut self, path: &P) -> Result<Video>
+    pub fn create_video<P>(&mut self, path: &P) -> Result<(Video, AudioSink)>
     where
         P: AsRef<Path> + ?Sized,
     {

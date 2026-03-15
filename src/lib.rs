@@ -1,8 +1,15 @@
-pub mod context;
-pub mod decode;
-pub mod error;
-pub mod playback;
-pub mod video;
+pub(crate) mod context;
+pub(crate) mod decode;
+pub(crate) mod error;
+pub(crate) mod video;
+
+pub use context::Context;
+pub use decode::{
+    audio::{AudioInfo, AudioParameters, AudioSink, DeviceAudioSink},
+    video::VideoInfo,
+};
+pub use error::{Error, Result};
+pub use video::{SeekMode, Video};
 
 #[cfg(target_os = "windows")]
 pub fn required_wgpu_device_features(adapter: &wgpu::Adapter) -> wgpu::Features {

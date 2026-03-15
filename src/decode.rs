@@ -1,326 +1,285 @@
-#[cfg(target_os = "windows")]
-mod d3d11va;
-#[cfg(target_os = "linux")]
-mod vaapi;
-#[cfg(target_os = "macos")]
-mod video_toolbox;
+pub(crate) mod audio;
+pub(crate) mod hw;
+pub(crate) mod read;
+pub(crate) mod video;
 
-use crate::{
-    context::pipeline_cache::PipelineCache,
-    error::{Error, Result},
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
 };
+
+use crate::decode::{audio::AudioInfo, video::VideoInfo};
+use atomic_float::AtomicF64;
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use ffmpeg_next::{self as ffn, sys as ff};
-use std::{
-    path::Path,
-    pin::Pin,
-    ptr::{NonNull, null_mut},
-    time::Duration,
-};
 
-pub(crate) trait HardwareDecoder: Sized {
-    const DEVICE_TYPE: ff::AVHWDeviceType;
-
-    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Result<Self>;
-    unsafe fn import_frame(
-        &mut self,
-        frame: NonNull<ff::AVFrame>,
-        instance: &wgpu::Instance,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        layout: &wgpu::BindGroupLayout,
-    ) -> Result<()>;
-    fn bind_group(&self) -> Option<&wgpu::BindGroup>;
-    fn name(&self) -> &'static str;
-}
-
-#[cfg(target_os = "windows")]
-type NativeDecoder = d3d11va::D3D11VAHardwareDecoder;
-
-#[cfg(target_os = "linux")]
-type NativeDecoder = vaapi::VAAPIHardwareDecoder;
-
-#[cfg(target_os = "macos")]
-type NativeDecoder = video_toolbox::VideoToolboxHardwareDecoder;
-
-unsafe extern "C" fn get_hw_format(
-    decoder_ctx: *mut ff::AVCodecContext,
-    mut px_fmts: *const ff::AVPixelFormat,
-) -> ff::AVPixelFormat {
-    unsafe {
-        let decoder_data = ((*decoder_ctx).opaque as *mut DecoderData)
-            .as_mut()
-            .unwrap();
-        while (*px_fmts) != ff::AVPixelFormat::AV_PIX_FMT_NONE {
-            if (*px_fmts) == decoder_data.hw_pixel_format {
-                return *px_fmts;
-            }
-            px_fmts = px_fmts.add(1);
-        }
-        ff::AVPixelFormat::AV_PIX_FMT_NONE
-    }
-}
-
-pub struct FrameDecoder {
-    pub(crate) hwdec: NativeDecoder,
-    texture: wgpu::Texture,
-    texture_view: wgpu::TextureView,
-    bg0_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::RenderPipeline,
-}
-
-impl FrameDecoder {
-    fn new(
-        hwctx: NonNull<ff::AVBufferRef>,
-        device: &wgpu::Device,
-        pipeline_cache: &mut PipelineCache,
-        color_space: ffn::color::Space,
-        width: u32,
-        height: u32,
-    ) -> Result<Self> {
-        let hwdec = unsafe { NativeDecoder::new(hwctx)? };
-
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: width,
-                height: height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
-        });
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bg0_layout = pipeline_cache.bind_group_layout().clone();
-        let pipeline = pipeline_cache.get(color_space).clone();
-
-        Ok(FrameDecoder {
-            hwdec,
-            texture,
-            texture_view,
-            bg0_layout,
-            pipeline,
-        })
-    }
-
-    pub unsafe fn decode_native_frame(
-        &mut self,
-        instance: &wgpu::Instance,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        frame: &ffn::Frame,
-    ) -> Result<()> {
-        unsafe {
-            self.hwdec.import_frame(
-                NonNull::new_unchecked(frame.as_ptr() as *mut _),
-                instance,
-                adapter,
-                device,
-                queue,
-                encoder,
-                &self.bg0_layout,
-            )?
-        };
-        self.copy_to_rgb(encoder);
-        Ok(())
-    }
-
-    pub fn copy_to_rgb(&self, encoder: &mut wgpu::CommandEncoder) {
-        let Some(bg0) = self.hwdec.bind_group() else {
-            return;
-        };
-
-        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.texture_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        rpass.set_pipeline(&self.pipeline);
-        rpass.set_bind_group(0, bg0, &[]);
-        rpass.draw(0..3, 0..1);
-    }
-
-    pub fn texture(&self) -> &wgpu::Texture {
-        &self.texture
-    }
-}
-
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VideoInfo {
-    pub index: usize,
-    pub time_base: ffn::Rational,
-    pub framerate: ffn::Rational,
-    pub width: u32,
-    pub height: u32,
-    pub duration: Duration,
+pub(crate) enum PlayState {
+    Playing = 0,
+    Paused,
+    Step,
 }
 
-impl Default for VideoInfo {
-    fn default() -> Self {
-        Self {
-            index: 0,
-            time_base: ffn::Rational::new(0, 1),
-            framerate: ffn::Rational::new(0, 1),
-            width: 0,
-            height: 0,
-            duration: Duration::ZERO,
+pub(crate) struct DecoderState {
+    pub(crate) alive: AtomicBool,
+    pub(crate) play_state: AtomicU8,
+    pub(crate) is_eof: AtomicBool,
+    pub(crate) current_pts: AtomicI64,
+
+    pub(crate) video_stream: RwLock<VideoInfo>,
+    pub(crate) audio_stream: RwLock<AudioInfo>,
+}
+
+impl DecoderState {
+    pub fn new() -> Self {
+        DecoderState {
+            alive: AtomicBool::new(true),
+            play_state: AtomicU8::new(PlayState::Playing as u8),
+            is_eof: AtomicBool::new(false),
+            current_pts: AtomicI64::new(0),
+
+            video_stream: RwLock::new(Default::default()),
+            audio_stream: RwLock::new(Default::default()),
         }
     }
-}
 
-struct DecoderData {
-    hw_pixel_format: ff::AVPixelFormat,
-}
+    pub fn play_state(&self) -> PlayState {
+        match self.play_state.load(Ordering::Relaxed) {
+            0 => PlayState::Playing,
+            1 => PlayState::Paused,
+            2 => PlayState::Step,
+            _ => unreachable!(),
+        }
+    }
 
-pub(crate) struct Input {
-    pub format_ctx: ffn::format::context::Input,
-}
-
-impl Input {
-    pub fn open<P>(path: &P) -> Result<Self>
-    where
-        P: AsRef<Path> + ?Sized,
-    {
-        ffn::init()?;
-        let format_ctx = ffn::format::input(path)?;
-        Ok(Input { format_ctx })
+    pub fn kill(&self) {
+        self.alive.store(false, Ordering::SeqCst);
     }
 }
 
-pub(crate) struct VideoDecoder {
-    pub decoder_ctx: ffn::decoder::Video,
-    pub hwctx: NonNull<ff::AVBufferRef>,
-    pub info: VideoInfo,
-    _decoder_data: Pin<Box<DecoderData>>,
+pub(crate) struct PacketQueueMetadata {
+    pub duration: AtomicI64,
+    pub serial: AtomicU32,
 }
 
-impl VideoDecoder {
-    pub fn new(
-        input: &mut Input,
-        device: &wgpu::Device,
-        pipeline_cache: &mut PipelineCache,
-    ) -> Result<(Self, FrameDecoder)> {
-        let video_stream = input
-            .format_ctx
-            .streams()
-            .best(ffn::media::Type::Video)
-            .ok_or(Error::InvalidStream)?;
+struct Packet {
+    pub packet: ffn::Packet,
+    pub serial: u32,
+}
 
-        let video_stream_index = video_stream.index();
+#[derive(Clone)]
+pub(crate) struct PacketSender {
+    metadata: Arc<PacketQueueMetadata>,
+    rx: Receiver<Packet>,
+    tx: Sender<Packet>,
+}
 
-        let video_codec = video_stream.parameters().id();
-        let decoder =
-            ffn::decoder::find(video_codec).ok_or(Error::MissingCodec(video_codec.name()))?;
+impl PacketSender {
+    const MIN_FRAMES: usize = 25;
 
-        let mut hw_pixel_format = ff::AVPixelFormat::AV_PIX_FMT_NONE;
-        for i in 0..16 {
-            let config = unsafe {
-                ff::avcodec_get_hw_config(decoder.as_ptr(), i)
-                    .as_ref()
-                    .ok_or(Error::MissingCodec(video_codec.name()))?
-            };
-            if (config.methods & ff::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32) != 0
-                && config.device_type == NativeDecoder::DEVICE_TYPE
-            {
-                hw_pixel_format = config.pix_fmt;
-                break;
+    fn push(&self, packet: ffn::Packet) {
+        self.metadata
+            .duration
+            .fetch_add(packet.duration(), Ordering::SeqCst);
+        let serial = self.metadata.serial.load(Ordering::SeqCst);
+        self.tx.send(Packet { packet, serial }).unwrap();
+    }
+
+    fn push_null(&self, mut packet: ffn::Packet, stream_index: usize) {
+        packet.set_stream(stream_index);
+        self.push(packet);
+    }
+
+    fn has_enough_packets(&self, time_base: ffn::Rational) -> bool {
+        self.tx.len() > Self::MIN_FRAMES
+            && (f64::from(time_base) * self.metadata.duration.load(Ordering::SeqCst) as f64) > 1.0
+    }
+
+    fn flush(&self) {
+        while let Ok(_) = self.rx.try_recv() {}
+        self.metadata.duration.store(0, Ordering::SeqCst);
+        self.metadata.serial.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+unsafe impl Send for PacketSender {}
+unsafe impl Sync for PacketSender {}
+
+#[derive(Clone)]
+pub(crate) struct PacketReceiver {
+    metadata: Arc<PacketQueueMetadata>,
+    rx: Receiver<Packet>,
+}
+
+impl PacketReceiver {
+    fn try_receive(&self) -> Option<Packet> {
+        let Ok(recv) = self.rx.try_recv() else {
+            return None;
+        };
+        self.metadata
+            .duration
+            .fetch_sub(recv.packet.duration(), Ordering::SeqCst);
+        Some(recv)
+    }
+}
+
+unsafe impl Send for PacketReceiver {}
+unsafe impl Sync for PacketReceiver {}
+
+pub(crate) fn packet_queue() -> (PacketSender, PacketReceiver, Arc<PacketQueueMetadata>) {
+    let metadata = Arc::new(PacketQueueMetadata {
+        duration: AtomicI64::new(0),
+        serial: AtomicU32::new(0),
+    });
+    let (tx, rx) = unbounded();
+    let tx = PacketSender {
+        metadata: metadata.clone(),
+        rx: rx.clone(),
+        tx,
+    };
+    let rx = PacketReceiver {
+        metadata: metadata.clone(),
+        rx,
+    };
+    (tx, rx, metadata)
+}
+
+pub(crate) struct Frame {
+    pub frame: ffn::Frame,
+    pub serial: u32,
+}
+
+#[derive(Clone)]
+pub(crate) struct FrameQueue {
+    free_tx: Sender<Frame>,
+    free_rx: Receiver<Frame>,
+    queue_tx: Sender<Frame>,
+    queue_rx: Receiver<Frame>,
+}
+
+impl FrameQueue {
+    pub fn new(capacity: usize) -> Self {
+        let (free_tx, free_rx) = bounded(capacity);
+        let (queue_tx, queue_rx) = bounded(capacity);
+
+        for _ in 0..capacity {
+            let frame = unsafe { ffn::Frame::empty() };
+            free_tx
+                .send(Frame {
+                    frame,
+                    serial: u32::MAX,
+                })
+                .unwrap();
+        }
+
+        FrameQueue {
+            free_tx,
+            free_rx,
+            queue_tx,
+            queue_rx,
+        }
+    }
+
+    pub fn send(&self, frame: &mut ffn::Frame, serial: u32) {
+        if let Ok(mut dst) = self.free_rx.recv() {
+            unsafe {
+                ff::av_frame_unref(dst.frame.as_mut_ptr());
+                ff::av_frame_move_ref(dst.frame.as_mut_ptr(), frame.as_mut_ptr());
             }
+            dst.serial = serial;
+            self.queue_tx.send(dst).unwrap();
         }
+    }
 
-        let mut decoder_ctx = ffn::codec::Context::new_with_codec(decoder).decoder();
-        decoder_ctx.set_parameters(video_stream.parameters())?;
-        decoder_ctx.set_threading(ffn::threading::Config {
-            kind: ffn::threading::Type::Frame,
-            count: 0,
-        });
+    pub fn queued_len(&self) -> usize {
+        self.queue_rx.len()
+    }
 
-        let mut decoder_data = Box::pin(DecoderData { hw_pixel_format });
-        unsafe {
-            (*decoder_ctx.as_mut_ptr()).opaque = (&mut *decoder_data) as *mut _ as _;
-            (*decoder_ctx.as_mut_ptr()).get_format = Some(get_hw_format);
+    pub fn try_next(&self) -> Option<Frame> {
+        self.queue_rx.try_recv().ok()
+    }
+
+    pub fn release(&self, mut frame: Frame) {
+        unsafe { ff::av_frame_unref(frame.frame.as_mut_ptr()) };
+        self.free_tx.send(frame).unwrap();
+    }
+
+    pub fn flush(&self) {
+        while let Some(frame) = self.try_next() {
+            self.release(frame);
+        }
+    }
+}
+
+unsafe impl Send for FrameQueue {}
+unsafe impl Sync for FrameQueue {}
+
+// complete atomic abuse
+// but we really don't want to use locking primitives
+// because the clock is updated in the audio callback
+pub(crate) struct Clock {
+    pub pts: AtomicF64,
+    pub pts_drift: AtomicF64,
+    pub last_updated: AtomicF64,
+    pub speed: AtomicF64,
+    pub serial: AtomicU32,
+    pub paused: AtomicBool,
+    pub queue: Arc<PacketQueueMetadata>,
+}
+
+impl Clock {
+    pub const NO_SYNC_THRESHOLD: f64 = 10.;
+    pub const SYNC_MIN: f64 = 0.04;
+    pub const SYNC_MAX: f64 = 0.1;
+    pub const FRAME_DUPLICATION_THRESHOLD: f64 = 0.1;
+
+    pub fn new(queue: Arc<PacketQueueMetadata>) -> Self {
+        let clock = Clock {
+            pts: AtomicF64::new(0.),
+            pts_drift: AtomicF64::new(0.),
+            last_updated: AtomicF64::new(0.),
+            speed: AtomicF64::new(1.),
+            serial: AtomicU32::new(0),
+            paused: AtomicBool::new(false),
+            queue,
         };
+        clock.set(f64::NAN, u32::MAX, None);
+        clock
+    }
 
-        let mut hwctx = null_mut();
-        unsafe {
-            ff::av_hwdevice_ctx_create(
-                &mut hwctx,
-                NativeDecoder::DEVICE_TYPE,
-                null_mut(),
-                null_mut(),
-                0,
+    pub fn get(&self) -> Option<f64> {
+        let queue_serial = self.queue.serial.load(Ordering::Relaxed);
+        if self.serial.load(Ordering::Relaxed) != queue_serial {
+            None
+        } else if self.paused.load(Ordering::Relaxed) {
+            let pts = self.pts.load(Ordering::Relaxed);
+            if pts.is_nan() { None } else { Some(pts) }
+        } else {
+            let t = ffn::time::relative() as f64 / 1000000.;
+            Some(
+                self.pts_drift.load(Ordering::Relaxed) + t
+                    - (t - self.last_updated.load(Ordering::Relaxed))
+                        * (1. - self.speed.load(Ordering::Relaxed)),
             )
-        };
-
-        let hwctx = NonNull::new(hwctx).ok_or(Error::HardwareContext)?;
-        unsafe {
-            (*decoder_ctx.as_mut_ptr()).hw_device_ctx = ff::av_buffer_ref(hwctx.as_ptr());
         }
-
-        let decoder_ctx = decoder_ctx.video()?;
-
-        let width = decoder_ctx.width();
-        let height = decoder_ctx.height();
-        let color_space = decoder_ctx.color_space();
-
-        let frame_decoder = FrameDecoder::new(
-            hwctx,
-            device,
-            pipeline_cache,
-            color_space,
-            width as _,
-            height as _,
-        )?;
-
-        let info = VideoInfo {
-            index: video_stream_index,
-            time_base: video_stream.time_base(),
-            framerate: video_stream.avg_frame_rate(),
-            width: width,
-            height: height,
-            duration: Duration::from_secs_f64(
-                video_stream.duration() as f64 * video_stream.time_base().0 as f64
-                    / video_stream.time_base().1 as f64,
-            ),
-        };
-
-        Ok((
-            VideoDecoder {
-                decoder_ctx,
-                hwctx,
-                info,
-                _decoder_data: decoder_data,
-            },
-            frame_decoder,
-        ))
     }
-}
 
-impl Drop for VideoDecoder {
-    fn drop(&mut self) {
-        unsafe {
-            ff::av_buffer_unref(&mut self.hwctx.as_ptr());
+    pub fn set(&self, pts: f64, serial: u32, time: Option<f64>) {
+        let time = time.unwrap_or_else(|| ffn::time::relative() as f64 / 1000000.);
+        self.pts.store(pts, Ordering::Relaxed);
+        self.last_updated.store(time, Ordering::Relaxed);
+        self.pts_drift.store(pts - time, Ordering::Relaxed);
+        self.serial.store(serial, Ordering::Relaxed);
+    }
+
+    pub fn sync_to_slave(&self, slave: &Clock) {
+        let clock = self.get();
+        let slave_clock = self.get();
+        if let Some(slave_clock) = slave_clock
+            && clock.is_none_or(|clock| (clock - slave_clock).abs() > Clock::NO_SYNC_THRESHOLD)
+        {
+            self.set(slave_clock, slave.serial.load(Ordering::Relaxed), None);
         }
     }
 }
-
-unsafe impl Send for VideoDecoder {}
-unsafe impl Sync for VideoDecoder {}

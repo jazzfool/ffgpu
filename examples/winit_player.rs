@@ -1,6 +1,6 @@
-use ffgpu::{context::Context, video::SeekMode};
 use std::{borrow::Cow, sync::Arc, time::Duration};
 use winit::{
+    dpi::LogicalSize,
     event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -12,7 +12,10 @@ fn main() {
 
     let event_loop = EventLoop::new().unwrap();
 
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let window = WindowBuilder::new()
+        .with_title("winit player")
+        .build(&event_loop)
+        .unwrap();
     let window = Arc::new(window);
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -34,8 +37,12 @@ fn main() {
     }))
     .unwrap();
 
-    let mut context = Context::new(&instance, &adapter, &device, &queue);
-    let mut video = context.create_video("test.mp4").unwrap();
+    let path = std::env::args().nth(1).expect("no path given");
+    let mut context = ffgpu::Context::new(&instance, &adapter, &device, &queue);
+    let (mut video, audio_sink) = context.create_video(&path).unwrap();
+    let audio_sink = audio_sink.into_device_sink();
+
+    let _ = window.request_inner_size(LogicalSize::new(video.width(), video.height()));
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
@@ -145,8 +152,8 @@ fn main() {
 
     text_buffer_2.set_text(
         &mut font_system,
-        "[spacebar]: toggle pause\n[←→] arrow keys: seek (5s)\n[L]: toggle looping\n[>]: step one frame",
-        &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+        "[spacebar]: toggle pause\n[←→]: seek (5s)\n[↑↓] adjust volume\n[L]: toggle looping\n[>]: step one frame",
+        &glyphon::Attrs::new().family(glyphon::Family::Monospace),
         glyphon::Shaping::Basic,
         None,
     );
@@ -170,6 +177,7 @@ fn main() {
                     let mut encoder = device.create_command_encoder(&Default::default());
 
                     let wait = video.update(&mut encoder).expect("Video::update");
+                    let stats = video.statistics();
 
                     text_buffer_1.set_size(
                         &mut font_system,
@@ -185,7 +193,8 @@ fn main() {
                     text_buffer_1.set_text(
                         &mut font_system,
                         &format!(
-                            "test.mp4\n{}x{}@{:.02}fps\n{}\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\ndelay {:#?}",
+                            "{}\n{}x{}@{:.02}fps\n{}\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\n{:.0}% volume\ndelay {:#?}\nvideo clk: {:.03}\naudio clk: {:.03}\na/v sync: {:+04.0}ms",
+                            &path,
                             video.width(),
                             video.height(),
                             video.framerate(),
@@ -193,11 +202,15 @@ fn main() {
                             if video.paused() { "paused" } else { "playing" },
                             if video.looping() { "on" } else { "off" },
                             video.position().as_secs() / 60,
-                            video.position().as_secs(),
+                            video.position().as_secs() % 60,
                             video.position().as_millis() % 1000,
+                            (audio_sink.gain() * 100.).round(),
                             wait,
+                            stats.video_clock,
+                            stats.audio_clock,
+                            (stats.sync_latency * 1000.).round(),
                         ),
-                        &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+                        &glyphon::Attrs::new().family(glyphon::Family::Monospace),
                         glyphon::Shaping::Basic,
                         None,
                     );
@@ -293,9 +306,15 @@ fn main() {
                             video.set_paused(!video.paused());
                         }
                         PhysicalKey::Code(KeyCode::ArrowLeft) => video.seek(
-                            video.position() - Duration::from_secs(5).min(video.position()), SeekMode::Accurate),
+                            video.position() - Duration::from_secs(5).min(video.position()), ffgpu::SeekMode::Accurate),
                         PhysicalKey::Code(KeyCode::ArrowRight) => {
-                            video.seek(video.position() + Duration::from_secs(5), SeekMode::Accurate)
+                            video.seek(video.position() + Duration::from_secs(5), ffgpu::SeekMode::Accurate)
+                        }
+                        PhysicalKey::Code(KeyCode::ArrowUp) => {
+                            audio_sink.set_gain((audio_sink.gain() + 0.1).clamp(0., 1.));
+                        }
+                        PhysicalKey::Code(KeyCode::ArrowDown) => {
+                            audio_sink.set_gain((audio_sink.gain() - 0.1).clamp(0., 1.));
                         }
                         PhysicalKey::Code(KeyCode::Period) => {
                             video.step_one_frame();

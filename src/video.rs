@@ -1,14 +1,17 @@
 use crate::{
     context::pipeline_cache::PipelineCache,
-    decode::{FrameDecoder, HardwareDecoder, Input, VideoDecoder, VideoInfo},
-    error::Result,
-    playback::{
-        DecodeMessage, Frame, FrameQueue, PacketQueueMetadata, PlayState, PlaybackState,
-        ReadMessage, ReadThread, VideoThread, packet_queue,
+    decode::{
+        Clock, DecoderState, Frame, FrameQueue, PacketQueueMetadata, PlayState,
+        audio::{self, AudioDecoder, AudioSink, AudioThread},
+        hw::HardwareDecoder,
+        packet_queue,
+        read::{Input, ReadMessage, ReadThread},
+        video,
     },
+    error::Result,
 };
 use crossbeam_channel::{Sender, unbounded};
-use ffmpeg_next::sys as ff;
+use ffmpeg_next::{self as ffn, sys as ff};
 use std::{
     ops::Add,
     path::Path,
@@ -29,21 +32,34 @@ enum FrameResponse {
     Requeue,
 }
 
+pub struct Statistics {
+    pub video_clock: f64,
+    pub audio_clock: f64,
+    pub sync_latency: f64,
+    pub decoder_name: &'static str,
+}
+
 pub struct Video {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
 
-    pbs: Arc<PlaybackState>,
+    state: Arc<DecoderState>,
     video_queue: Arc<PacketQueueMetadata>,
-    frame_decoder: FrameDecoder,
-    frame_queue: FrameQueue,
+    audio_queue: Arc<PacketQueueMetadata>,
+    frame_decoder: video::FrameDecoder,
+    video_frame_queue: FrameQueue,
+    audio_frame_queue: FrameQueue,
     read_thread: Option<JoinHandle<()>>,
     video_thread: Option<JoinHandle<()>>,
+    audio_thread: Option<JoinHandle<()>>,
+    video_clock: Arc<Clock>,
+    audio_clock: Arc<Clock>,
 
     read_messages: Sender<ReadMessage>,
-    video_decode_messages: Sender<DecodeMessage>,
+    video_messages: Sender<video::Message>,
+    audio_messages: Sender<audio::Message>,
 
     looping: bool,
     frame_timer: f64,
@@ -61,20 +77,28 @@ impl Video {
         queue: wgpu::Queue,
         pipeline_cache: &mut PipelineCache,
         path: &P,
-    ) -> Result<Self>
+    ) -> Result<(Self, AudioSink)>
     where
         P: AsRef<Path> + ?Sized,
     {
         let mut input = Input::open(path)?;
 
         let (video_decoder, frame_decoder) =
-            VideoDecoder::new(&mut input, &device, pipeline_cache)?;
+            video::Decoder::new(&mut input, &device, pipeline_cache)?;
 
-        let pbs = Arc::new(PlaybackState::new());
+        let audio_decoder = AudioDecoder::new(&mut input)?;
+
+        let pbs = Arc::new(DecoderState::new());
         *pbs.video_stream.write().expect("write video_stream") = video_decoder.info;
+        *pbs.audio_stream.write().expect("write audio_stream") = audio_decoder.info;
 
         let (video_tx, video_rx, video_queue) = packet_queue();
-        let frame_queue = FrameQueue::new(18);
+        let (audio_tx, audio_rx, audio_queue) = packet_queue();
+        let video_frame_queue = FrameQueue::new(18);
+        let audio_frame_queue = FrameQueue::new(16);
+
+        let video_clock = Arc::new(Clock::new(video_queue.clone()));
+        let audio_clock = Arc::new(Clock::new(audio_queue.clone()));
 
         let (read_msg_tx, read_msg_rx) = unbounded();
 
@@ -82,45 +106,75 @@ impl Video {
             input,
             pbs.clone(),
             video_tx,
-            frame_queue.clone(),
+            audio_tx,
+            video_frame_queue.clone(),
+            audio_frame_queue.clone(),
             read_msg_rx,
         )
         .run();
 
-        let (video_decode_tx, video_decode_rx) = unbounded();
-
-        let video_thread = VideoThread::new(
+        let (video_msg_tx, video_msg_rx) = unbounded();
+        let video_thread = video::VideoThread::new(
             video_decoder,
             pbs.clone(),
             video_rx,
-            frame_queue.clone(),
-            video_decode_rx,
+            video_frame_queue.clone(),
+            video_msg_rx,
+            video_clock.clone(),
+            audio_clock.clone(),
         )
         .run();
 
-        Ok(Video {
-            instance,
-            adapter,
-            device,
-            queue,
+        let (audio_msg_tx, audio_msg_rx) = unbounded();
+        let audio_thread = AudioThread::new(
+            audio_decoder,
+            pbs.clone(),
+            audio_rx,
+            audio_frame_queue.clone(),
+            audio_msg_rx,
+        )
+        .run();
 
-            pbs,
-            video_queue,
-            frame_decoder,
-            frame_queue,
-            read_thread: Some(read_thread),
-            video_thread: Some(video_thread),
+        let audio_sink = AudioSink::new(
+            pbs.clone(),
+            audio_frame_queue.clone(),
+            audio_msg_tx.clone(),
+            audio_queue.clone(),
+            audio_clock.clone(),
+        );
 
-            read_messages: read_msg_tx,
-            video_decode_messages: video_decode_tx,
+        Ok((
+            Video {
+                instance,
+                adapter,
+                device,
+                queue,
 
-            looping: false,
-            frame_timer: 0.0,
-            last_pts: 0,
-            last_serial: 0,
-            queued_frame: None,
-            step_needs_copy: 0,
-        })
+                state: pbs,
+                video_queue,
+                audio_queue,
+                frame_decoder,
+                video_frame_queue,
+                audio_frame_queue,
+                read_thread: Some(read_thread),
+                video_thread: Some(video_thread),
+                audio_thread: Some(audio_thread),
+                video_clock,
+                audio_clock,
+
+                read_messages: read_msg_tx,
+                video_messages: video_msg_tx,
+                audio_messages: audio_msg_tx,
+
+                looping: false,
+                frame_timer: 0.0,
+                last_pts: 0,
+                last_serial: 0,
+                queued_frame: None,
+                step_needs_copy: 0,
+            },
+            audio_sink,
+        ))
     }
 
     pub fn texture(&self) -> &wgpu::Texture {
@@ -131,10 +185,10 @@ impl Video {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &Frame,
-        _queued_len: usize,
+        queued_len: usize,
         wait_duration: &mut Duration,
     ) -> Result<FrameResponse> {
-        let time = unsafe { ff::av_gettime_relative() as f64 / 1000000.0 };
+        let time = ffn::time::relative() as f64 / 1000000.0;
 
         if frame.serial != self.video_queue.serial.load(Ordering::SeqCst) {
             self.frame_timer = time;
@@ -161,29 +215,51 @@ impl Video {
             duration
         };
 
-        let delay = duration; // TODO: we need to add A/V sync latency here
-
-        *wait_duration = Duration::from_secs_f64((self.frame_timer + delay - time).max(0.0));
+        let mut delay = duration;
+        if let Some(video_clock) = self.video_clock.get()
+            && let Some(audio_clock) = self.audio_clock.get()
+        {
+            let diff = video_clock - audio_clock;
+            let sync_threshold = delay.clamp(Clock::SYNC_MIN, Clock::SYNC_MAX);
+            if diff < -sync_threshold {
+                delay = (delay + diff).max(0.);
+            } else if diff > sync_threshold && delay > Clock::FRAME_DUPLICATION_THRESHOLD {
+                delay += diff;
+            } else if diff > sync_threshold {
+                delay *= 2.;
+            }
+        }
 
         if time < self.frame_timer + delay {
             // too early
+            *wait_duration =
+                Duration::from_secs_f64(self.frame_timer + delay - time).min(*wait_duration);
             return Ok(FrameResponse::Requeue);
         }
 
         self.frame_timer += delay;
-        if delay > 0.0 && time - self.frame_timer > 0.1 {
+        if delay > 0.0 && time - self.frame_timer > Clock::SYNC_MAX {
             self.frame_timer = time;
         }
 
-        *wait_duration = Duration::from_secs_f64((self.frame_timer + delay - time).max(0.0));
+        let pts_sec = best_effort_timestamp as f64
+            * f64::from(
+                self.state
+                    .video_stream
+                    .read()
+                    .expect("read video_stream")
+                    .time_base,
+            );
+        self.video_clock.set(pts_sec, frame.serial, None);
 
-        /*if queued_len > 0 {
-            *retry = true;
-            return true;
-        }*/
+        if self.state.play_state() != PlayState::Step
+            && queued_len > 0
+            && time > self.frame_timer + duration
+        {
+            // drop late frame
+            return Ok(FrameResponse::Retry);
+        }
 
-        self.last_pts = best_effort_timestamp;
-        self.last_serial = frame.serial;
         unsafe {
             self.frame_decoder.decode_native_frame(
                 &self.instance,
@@ -195,28 +271,27 @@ impl Video {
             )?
         };
 
-        if self.pbs.play_state() == PlayState::Step {
+        if self.state.play_state() == PlayState::Step {
             self.step_needs_copy = self.step_needs_copy.add(4).min(16);
-            self.pbs
-                .play_state
-                .store(PlayState::Paused as _, Ordering::Relaxed);
+            self.set_paused(true);
         }
 
         Ok(FrameResponse::Continue)
     }
 
-    fn flush_frames(&mut self) {
+    fn flush(&mut self) {
         if let Some(queued_frame) = self.queued_frame.take() {
-            self.frame_queue.release(queued_frame);
+            self.video_frame_queue.release(queued_frame);
         }
 
-        while let Some(frame) = self.frame_queue.try_next() {
-            self.frame_queue.release(frame);
-        }
+        self.video_frame_queue.flush();
+        self.audio_frame_queue.flush();
+
+        // TODO: flush samples in AudioSink
     }
 
     pub fn update(&mut self, encoder: &mut wgpu::CommandEncoder) -> Result<Duration> {
-        let play_state = self.pbs.play_state();
+        let play_state = self.state.play_state();
 
         if play_state == PlayState::Playing {
             self.step_needs_copy = 0;
@@ -231,8 +306,8 @@ impl Video {
             self.frame_decoder.copy_to_rgb(encoder);
         }
 
-        if self.frame_queue.queued_len() == 0
-            && self.pbs.is_eof.load(Ordering::SeqCst)
+        if self.video_frame_queue.queued_len() == 0
+            && self.state.is_eof.load(Ordering::SeqCst)
             && self.looping
             && play_state != PlayState::Paused
         {
@@ -240,7 +315,7 @@ impl Video {
             self.seek(Duration::ZERO, SeekMode::Fast);
         }
 
-        if play_state == PlayState::Paused || self.frame_queue.queued_len() == 0 {
+        if play_state == PlayState::Paused || self.video_frame_queue.queued_len() == 0 {
             return Ok(Duration::from_millis(50));
         }
 
@@ -248,20 +323,24 @@ impl Video {
 
         let mut duration = Duration::from_secs_f64(f64::from(video_info.framerate.invert()));
         loop {
-            let queued_len = self.frame_queue.queued_len();
+            let queued_len = self.video_frame_queue.queued_len();
             let frame = self
                 .queued_frame
                 .take()
-                .or_else(|| self.frame_queue.try_next());
+                .or_else(|| self.video_frame_queue.try_next());
             if let Some(frame) = frame {
                 let response = self.update_frame(encoder, &frame, queued_len, &mut duration)?;
                 match response {
                     FrameResponse::Continue => {
-                        self.frame_queue.release(frame);
+                        self.last_pts = unsafe { (*frame.frame.as_ptr()).best_effort_timestamp };
+                        self.last_serial = frame.serial;
+                        self.video_frame_queue.release(frame);
                         break;
                     }
                     FrameResponse::Retry => {
-                        self.frame_queue.release(frame);
+                        self.last_pts = unsafe { (*frame.frame.as_ptr()).best_effort_timestamp };
+                        self.last_serial = frame.serial;
+                        self.video_frame_queue.release(frame);
                     }
                     FrameResponse::Requeue => {
                         self.queued_frame = Some(frame);
@@ -276,12 +355,26 @@ impl Video {
         Ok(duration)
     }
 
-    fn video_info(&self) -> VideoInfo {
-        self.pbs
+    fn video_info(&self) -> video::VideoInfo {
+        self.state
             .video_stream
             .read()
             .expect("read video_stream")
             .clone()
+    }
+
+    pub fn statistics(&self) -> Statistics {
+        let video_clock = self.video_clock.get().unwrap_or(0.);
+        let audio_clock = self.audio_clock.get().unwrap_or(0.);
+        let sync_latency = video_clock - audio_clock;
+        let decoder_name = self.frame_decoder.hwdec.name();
+
+        Statistics {
+            video_clock,
+            audio_clock,
+            sync_latency,
+            decoder_name,
+        }
     }
 
     #[inline]
@@ -322,24 +415,40 @@ impl Video {
             log::error!("failed to send seek message: {}", error);
         }
 
-        self.flush_frames();
+        self.flush();
 
         match mode {
             SeekMode::Accurate => {
                 let _ = self
-                    .video_decode_messages
-                    .send(DecodeMessage::SkipToTimestamp(ts));
+                    .video_messages
+                    .send(video::Message::SkipToTimestamp(ts));
+                let _ = self
+                    .audio_messages
+                    .send(audio::Message::SkipToTimestamp(ts));
             }
             _ => {}
         }
     }
 
     pub fn paused(&self) -> bool {
-        self.pbs.play_state() != PlayState::Playing
+        self.state.play_state() != PlayState::Playing
     }
 
     pub fn set_paused(&mut self, paused: bool) {
-        self.pbs.play_state.store(
+        if !paused {
+            self.frame_timer += ffn::time::relative() as f64 / 1000000.0
+                - self.video_clock.last_updated.load(Ordering::Relaxed);
+            self.video_clock.set(
+                self.video_clock.get().unwrap_or(0.),
+                self.video_clock.serial.load(Ordering::Relaxed),
+                None,
+            );
+        }
+
+        self.video_clock.paused.store(paused, Ordering::Relaxed);
+        self.audio_clock.paused.store(paused, Ordering::Relaxed);
+
+        self.state.play_state.store(
             if paused {
                 PlayState::Paused
             } else {
@@ -357,8 +466,9 @@ impl Video {
         self.looping = looping;
     }
 
-    pub fn step_one_frame(&self) {
-        self.pbs
+    pub fn step_one_frame(&mut self) {
+        self.set_paused(false);
+        self.state
             .play_state
             .store(PlayState::Step as _, Ordering::Relaxed);
     }
@@ -366,9 +476,13 @@ impl Video {
 
 impl Drop for Video {
     fn drop(&mut self) {
-        self.flush_frames();
+        self.flush();
 
-        self.pbs.kill();
+        self.state.kill();
+
+        if let Some(audio_thread) = self.audio_thread.take() {
+            audio_thread.join().unwrap();
+        }
 
         if let Some(video_thread) = self.video_thread.take() {
             video_thread.join().unwrap();

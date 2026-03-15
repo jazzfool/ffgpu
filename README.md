@@ -16,7 +16,7 @@ I have no plans to support zero-copy on the OpenGL backend on any platform (but 
 The same goes for web and mobile platforms (Android and iOS).
 
 This library is very incomplete and the following features are missing/WIP (roughly in order of priority):
-- Audio support (with the audio clock serving as the master clock). This includes handling A/V latency sync.
+- Wider YUV format support + 10-bit support
 - Network streams
 - Stream query and selection
 - Subtitle decoding (including from a separate file)

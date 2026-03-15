@@ -84,6 +84,12 @@ impl PipelineCache {
     }
 
     pub fn get(&mut self, color_space: ffn::color::Space) -> &wgpu::RenderPipeline {
+        let color_space = if color_space == ffn::color::Space::Unspecified {
+            ffn::color::Space::BT709
+        } else {
+            color_space
+        };
+
         self.pipelines.entry(color_space as i32).or_insert_with(|| {
             let color_matrix = yuv_to_rgb_matrix(color_space);
 
