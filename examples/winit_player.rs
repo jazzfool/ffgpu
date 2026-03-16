@@ -1,4 +1,8 @@
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use winit::{
     dpi::LogicalSize,
     event::{ElementState, Event, WindowEvent},
@@ -109,6 +113,7 @@ fn main() {
             window.inner_size().height,
         )
         .unwrap();
+    config.present_mode = wgpu::PresentMode::AutoVsync;
     surface.configure(&device, &config);
 
     let video_texture = video.texture().clone();
@@ -159,6 +164,8 @@ fn main() {
     );
     text_buffer_2.shape_until_scroll(&mut font_system, false);
 
+    let mut wait_until = Instant::now();
+
     let window = &window;
     event_loop
         .run(move |event, target| match event {
@@ -171,12 +178,21 @@ fn main() {
                     window.request_redraw();
                 }
                 WindowEvent::RedrawRequested => {
+                    window.request_redraw();
+
+                    let now = Instant::now();
+                    if now < wait_until {
+                        std::thread::sleep(wait_until - now);
+                        return;
+                    }
+
                     let frame = surface.get_current_texture().unwrap();
                     let frame_view = frame.texture.create_view(&Default::default());
 
                     let mut encoder = device.create_command_encoder(&Default::default());
 
                     let wait = video.update(&mut encoder).expect("Video::update");
+                    wait_until = now + wait;
                     let stats = video.statistics();
 
                     text_buffer_1.set_size(
@@ -295,8 +311,6 @@ fn main() {
                     queue.submit(Some(encoder.finish()));
                     window.pre_present_notify();
                     frame.present();
-
-                    target.set_control_flow(ControlFlow::wait_duration(wait));
                 }
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
@@ -327,7 +341,6 @@ fn main() {
                 }
                 _ => {}
             },
-            Event::NewEvents(winit::event::StartCause::ResumeTimeReached { .. }) => window.request_redraw(),
             _ => {}
         })
         .unwrap();
