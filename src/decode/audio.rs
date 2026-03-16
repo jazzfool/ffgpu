@@ -7,7 +7,7 @@ use crate::{
 };
 use atomic_float::AtomicF32;
 use crossbeam_channel::{Receiver, Sender};
-use ffmpeg_next::{self as ffn, sys as ff};
+use ffmpeg_next::{self as ffn, Rescale, sys as ff};
 use std::{
     mem::ManuallyDrop,
     sync::{
@@ -280,9 +280,20 @@ impl AudioThread {
                         let resampled_pts = unsafe {
                             ff::swr_next_pts(
                                 resampler.resampler.as_mut_ptr(),
-                                (*frame.as_ptr()).pts,
+                                (*frame.as_ptr()).pts * resampler.parameters.sample_rate as i64,
                             )
                         };
+
+                        let resampled_pts = resampled_pts / self.decoder.info.sample_rate as i64;
+
+                        if audio_frame.channel_layout().0.order
+                            == ff::AVChannelOrder::AV_CHANNEL_ORDER_UNSPEC
+                        {
+                            let channels = audio_frame.channels();
+                            audio_frame
+                                .set_channel_layout(ffn::ChannelLayout::default(channels as _));
+                        }
+
                         if let Err(error) =
                             resampler.resampler.run(&audio_frame, &mut resampler.frame)
                         {
@@ -432,9 +443,12 @@ impl AudioSink {
                 return Ok(());
             };
 
-            // TODO: check frame serial
-
             let serial = frame.serial;
+            if serial != self.queue.serial.load(Ordering::Relaxed) {
+                self.frame_queue.release(frame);
+                continue;
+            }
+
             let mut frame = ManuallyDrop::new(ffn::util::frame::Audio::from(frame.frame));
 
             let format = ffn::format::Sample::F32(ffn::format::sample::Type::Packed);
@@ -470,7 +484,6 @@ impl AudioSink {
 
             let (_, samples, _) = unsafe { frame.data(0).align_to::<f32>() };
             self.samples.extend_from_slice(samples);
-            unsafe { ff::av_frame_unref(frame.as_mut_ptr()) };
 
             self.frame_queue.release(Frame {
                 frame: unsafe { ffn::Frame::wrap(frame.as_mut_ptr()) },
@@ -483,9 +496,12 @@ impl AudioSink {
         }
 
         if !self.last_pts.is_nan() {
+            // last_pts tells us the pts at the very end of self.samples
+            // so the current pts (where the audio sink is currently at)
+            // is the last_pts - buffered (unread) samples duration
             let target_rate = self.parameters.sample_rate * self.parameters.channels as u32;
             self.clock.set(
-                self.last_pts - (2 * out.len() + self.samples.len()) as f64 / target_rate as f64,
+                self.last_pts - self.samples.len() as f64 / target_rate as f64,
                 self.last_serial,
                 Some(time),
             );
