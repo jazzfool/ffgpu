@@ -7,13 +7,10 @@ use crate::{
 };
 use atomic_float::AtomicF32;
 use crossbeam_channel::{Receiver, Sender};
-use ffmpeg_next::{self as ffn, Rescale, sys as ff};
+use ffmpeg_next::{self as ffn, sys as ff};
 use std::{
     mem::ManuallyDrop,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     thread::JoinHandle,
     time::Duration,
 };
@@ -154,7 +151,7 @@ impl AudioThread {
             .as_ref()
             .is_none_or(|resampler| resampler.parameters != parameters)
         {
-            let audio_info = self.state.audio_stream.read().expect("read audio_stream");
+            let audio_info = self.state.audio_stream.load().as_ref().clone();
 
             let format = ffn::format::Sample::F32(ffn::format::sample::Type::Packed);
             let channel_layout = ffn::ChannelLayout(ff::AVChannelLayout {
@@ -411,19 +408,11 @@ impl AudioSink {
     }
 
     pub fn sample_rate(&self) -> u32 {
-        self.state
-            .audio_stream
-            .read()
-            .expect("read audio_stream")
-            .sample_rate
+        self.state.audio_stream.load().sample_rate
     }
 
     pub fn channels(&self) -> u16 {
-        self.state
-            .audio_stream
-            .read()
-            .expect("read audio_stream")
-            .channels
+        self.state.audio_stream.load().channels
     }
 
     pub fn read_to_slice(&mut self, out: &mut [f32], gain: f32) -> Result<()> {
@@ -467,15 +456,7 @@ impl AudioSink {
             }
 
             self.last_pts = if let Some(pts) = frame.pts() {
-                pts as f64
-                    * f64::from(
-                        // locking... bad
-                        self.state
-                            .audio_stream
-                            .read()
-                            .expect("read audio_stream")
-                            .time_base,
-                    )
+                pts as f64 * f64::from(self.state.audio_stream.load().time_base)
                     + frame.samples() as f64 / frame.rate() as f64
             } else {
                 f64::NAN

@@ -88,9 +88,9 @@ impl Video {
 
         let audio_decoder = AudioDecoder::new(&mut input)?;
 
-        let pbs = Arc::new(DecoderState::new());
-        *pbs.video_stream.write().expect("write video_stream") = video_decoder.info;
-        *pbs.audio_stream.write().expect("write audio_stream") = audio_decoder.info;
+        let state = Arc::new(DecoderState::new());
+        state.video_stream.store(Arc::new(video_decoder.info));
+        state.audio_stream.store(Arc::new(audio_decoder.info));
 
         let (video_tx, video_rx, video_queue) = packet_queue();
         let (audio_tx, audio_rx, audio_queue) = packet_queue();
@@ -104,7 +104,7 @@ impl Video {
 
         let read_thread = ReadThread::new(
             input,
-            pbs.clone(),
+            state.clone(),
             video_tx,
             audio_tx,
             video_frame_queue.clone(),
@@ -116,7 +116,7 @@ impl Video {
         let (video_msg_tx, video_msg_rx) = unbounded();
         let video_thread = video::VideoThread::new(
             video_decoder,
-            pbs.clone(),
+            state.clone(),
             video_rx,
             video_frame_queue.clone(),
             video_msg_rx,
@@ -128,7 +128,7 @@ impl Video {
         let (audio_msg_tx, audio_msg_rx) = unbounded();
         let audio_thread = AudioThread::new(
             audio_decoder,
-            pbs.clone(),
+            state.clone(),
             audio_rx,
             audio_frame_queue.clone(),
             audio_msg_rx,
@@ -136,7 +136,7 @@ impl Video {
         .run();
 
         let audio_sink = AudioSink::new(
-            pbs.clone(),
+            state.clone(),
             audio_frame_queue.clone(),
             audio_msg_tx.clone(),
             audio_queue.clone(),
@@ -150,7 +150,7 @@ impl Video {
                 device,
                 queue,
 
-                state: pbs,
+                state,
                 video_queue,
                 audio_queue,
                 frame_decoder,
@@ -242,14 +242,8 @@ impl Video {
             self.frame_timer = time;
         }
 
-        let pts_sec = best_effort_timestamp as f64
-            * f64::from(
-                self.state
-                    .video_stream
-                    .read()
-                    .expect("read video_stream")
-                    .time_base,
-            );
+        let pts_sec =
+            best_effort_timestamp as f64 * f64::from(self.state.video_stream.load().time_base);
         self.video_clock.set(pts_sec, frame.serial, None);
 
         if self.state.play_state() != PlayState::Step
@@ -356,11 +350,7 @@ impl Video {
     }
 
     fn video_info(&self) -> video::VideoInfo {
-        self.state
-            .video_stream
-            .read()
-            .expect("read video_stream")
-            .clone()
+        *self.state.video_stream.load().clone()
     }
 
     pub fn statistics(&self) -> Statistics {

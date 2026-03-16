@@ -4,11 +4,12 @@ pub(crate) mod read;
 pub(crate) mod video;
 
 use std::sync::{
-    Arc, RwLock,
+    Arc,
     atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
 };
 
 use crate::decode::{audio::AudioInfo, video::VideoInfo};
+use arc_swap::ArcSwap;
 use atomic_float::AtomicF64;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use ffmpeg_next::{self as ffn, sys as ff};
@@ -27,8 +28,8 @@ pub(crate) struct DecoderState {
     pub(crate) is_eof: AtomicBool,
     pub(crate) current_pts: AtomicI64,
 
-    pub(crate) video_stream: RwLock<VideoInfo>,
-    pub(crate) audio_stream: RwLock<AudioInfo>,
+    pub(crate) video_stream: ArcSwap<VideoInfo>,
+    pub(crate) audio_stream: ArcSwap<AudioInfo>,
 }
 
 impl DecoderState {
@@ -39,8 +40,8 @@ impl DecoderState {
             is_eof: AtomicBool::new(false),
             current_pts: AtomicI64::new(0),
 
-            video_stream: RwLock::new(Default::default()),
-            audio_stream: RwLock::new(Default::default()),
+            video_stream: ArcSwap::new(Default::default()),
+            audio_stream: ArcSwap::new(Default::default()),
         }
     }
 

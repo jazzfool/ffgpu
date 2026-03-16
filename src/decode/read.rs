@@ -1,6 +1,6 @@
 use crate::{
     decode::{DecoderState, FrameQueue, PacketSender, PlayState},
-    error::{Error, Result},
+    error::Result,
 };
 use crossbeam_channel::Receiver;
 use ffmpeg_next::{self as ffn, sys as ff};
@@ -33,7 +33,7 @@ pub(crate) enum ReadMessage {
 
 pub(crate) struct ReadThread {
     input: Input,
-    pbs: Arc<DecoderState>,
+    state: Arc<DecoderState>,
     video_tx: PacketSender,
     audio_tx: PacketSender,
     video_frame_queue: FrameQueue,
@@ -53,7 +53,7 @@ impl ReadThread {
     ) -> Self {
         ReadThread {
             input,
-            pbs,
+            state: pbs,
             video_tx,
             audio_tx,
             video_frame_queue,
@@ -65,8 +65,8 @@ impl ReadThread {
     fn run_thread(&mut self) {
         const MAX_QUEUE_SIZE: usize = 15 * 1024 * 1024;
 
-        while self.pbs.alive.load(Ordering::Relaxed) {
-            let play_state = self.pbs.play_state();
+        while self.state.alive.load(Ordering::Relaxed) {
+            let play_state = self.state.play_state();
             // TODO: for network streams
             /*if self.was_paused != paused {
                 self.was_paused = paused;
@@ -80,19 +80,8 @@ impl ReadThread {
                 }
             }*/
 
-            let video_stream = self
-                .pbs
-                .video_stream
-                .read()
-                .expect("read video_stream")
-                .clone();
-
-            let audio_stream = self
-                .pbs
-                .audio_stream
-                .read()
-                .expect("read audio_stream")
-                .clone();
+            let video_stream = self.state.video_stream.load().clone();
+            let audio_stream = self.state.audio_stream.load().clone();
 
             while let Ok(message) = self.messages.try_recv() {
                 match message {
@@ -113,7 +102,7 @@ impl ReadThread {
                         } {
                             log::error!("failed to seek stream: {}", error);
                         } else {
-                            self.pbs.is_eof.store(false, Ordering::SeqCst);
+                            self.state.is_eof.store(false, Ordering::SeqCst);
 
                             self.video_tx.flush();
                             self.video_tx
@@ -124,7 +113,7 @@ impl ReadThread {
                                 .push_null(ffn::Packet::empty(), audio_stream.index);
 
                             if play_state == PlayState::Paused {
-                                self.pbs
+                                self.state
                                     .play_state
                                     .store(PlayState::Step as _, Ordering::Relaxed);
                             }
@@ -142,7 +131,7 @@ impl ReadThread {
                 continue;
             }
 
-            let is_eof = self.pbs.is_eof.load(Ordering::SeqCst);
+            let is_eof = self.state.is_eof.load(Ordering::SeqCst);
 
             if play_state == PlayState::Playing
                 && is_eof
@@ -155,7 +144,7 @@ impl ReadThread {
             let mut packet = ffn::Packet::empty();
             match packet.read(&mut self.input.format_ctx) {
                 Ok(_) => {
-                    self.pbs.is_eof.store(false, Ordering::SeqCst);
+                    self.state.is_eof.store(false, Ordering::SeqCst);
                 }
                 Err(error) => {
                     if !is_eof
@@ -169,7 +158,7 @@ impl ReadThread {
                             .push_null(ffn::Packet::empty(), audio_stream.index);
                         // self.subtitle_q.push_null();
 
-                        self.pbs.is_eof.store(true, Ordering::SeqCst);
+                        self.state.is_eof.store(true, Ordering::SeqCst);
                     }
 
                     let avio_error = unsafe { (*(*self.input.format_ctx.as_ptr()).pb).error };

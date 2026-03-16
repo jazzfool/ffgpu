@@ -17,6 +17,7 @@ env_logger = "0.11"
 log = "0.4"
 crossbeam-channel = "0.5"
 atomic_float = "1.1"
+arc-swap = "1.8"
 
 # for native audio output
 cpal = { version = "0.17", optional = true }
