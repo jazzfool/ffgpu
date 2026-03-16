@@ -6,7 +6,7 @@ use std::{
 use winit::{
     dpi::LogicalSize,
     event::{ElementState, Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };

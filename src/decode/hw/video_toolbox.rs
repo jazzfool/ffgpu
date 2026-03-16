@@ -1,6 +1,6 @@
 use crate::{
     context::pipeline_cache::PipelineCache,
-    decode::HardwareDecoder,
+    decode::hw::HardwareDecoder,
     error::{Error, Result},
 };
 use ffmpeg_next::sys as ff;
