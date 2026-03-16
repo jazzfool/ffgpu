@@ -134,7 +134,7 @@ impl PipelineCache {
         })
     }
 
-    pub fn create_nv12_bind_group(
+    pub fn create_yuv_bind_group(
         device: &wgpu::Device,
         texture: &wgpu::Texture,
         layout: &wgpu::BindGroupLayout,

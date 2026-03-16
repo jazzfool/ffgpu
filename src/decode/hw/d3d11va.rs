@@ -27,11 +27,32 @@ struct AVD3D11VADeviceContext {
 }
 
 enum TextureDestination {
-    ExternalNV12,
+    ExternalYUV,
     PlanarCopy {
         y_texture: wgpu::Texture,
         uv_texture: wgpu::Texture,
     },
+}
+
+fn get_dxgi_yuv_format(format: Dxgi::Common::DXGI_FORMAT) -> Option<wgpu::TextureFormat> {
+    match format {
+        Dxgi::Common::DXGI_FORMAT_NV12 => Some(wgpu::TextureFormat::NV12),
+        Dxgi::Common::DXGI_FORMAT_P010 => Some(wgpu::TextureFormat::P010),
+        _ => None,
+    }
+}
+
+fn get_dxgi_planar_format(format: Dxgi::Common::DXGI_FORMAT) -> Option<[wgpu::TextureFormat; 2]> {
+    match format {
+        Dxgi::Common::DXGI_FORMAT_NV12 => {
+            Some([wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm])
+        }
+        Dxgi::Common::DXGI_FORMAT_P010 => Some([
+            wgpu::TextureFormat::R16Unorm,
+            wgpu::TextureFormat::Rg16Unorm,
+        ]),
+        _ => None,
+    }
 }
 
 struct ImportedTexture {
@@ -50,14 +71,18 @@ impl ImportedTexture {
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
     ) -> Result<Self> {
+        if get_dxgi_yuv_format(desc.Format).is_none() {
+            return Err(Error::UnsupportedPixelFormat);
+        }
+
         unsafe {
             let (shared_texture, desc, handle) =
                 ImportedTexture::create_shared_texture(d3d11_device, desc)?;
             let texture = ImportedTexture::import_handle_d3d12(device, &desc, handle)?;
-            let bg0 = PipelineCache::create_nv12_bind_group(device, &texture, layout);
+            let bg0 = PipelineCache::create_yuv_bind_group(device, &texture, layout);
             Ok(ImportedTexture {
                 shared_texture,
-                destination: TextureDestination::ExternalNV12,
+                destination: TextureDestination::ExternalYUV,
                 bg0,
             })
         }
@@ -69,14 +94,18 @@ impl ImportedTexture {
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
     ) -> Result<Self> {
+        if get_dxgi_yuv_format(desc.Format).is_none() {
+            return Err(Error::UnsupportedPixelFormat);
+        }
+
         unsafe {
             let (shared_texture, desc, handle) =
                 ImportedTexture::create_shared_texture(d3d11_device, desc)?;
             let texture = ImportedTexture::import_handle_vulkan(device, &desc, handle)?;
-            let bg0 = PipelineCache::create_nv12_bind_group(device, &texture, layout);
+            let bg0 = PipelineCache::create_yuv_bind_group(device, &texture, layout);
             Ok(ImportedTexture {
                 shared_texture,
-                destination: TextureDestination::ExternalNV12,
+                destination: TextureDestination::ExternalYUV,
                 bg0,
             })
         }
@@ -88,6 +117,10 @@ impl ImportedTexture {
         d3d11_device: &D3D11::ID3D11Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
     ) -> Result<Self> {
+        if get_dxgi_planar_format(desc.Format).is_none() {
+            return Err(Error::UnsupportedPixelFormat);
+        }
+
         unsafe {
             let (shared_texture, desc) =
                 ImportedTexture::create_mapped_texture(d3d11_device, desc)?;
@@ -115,7 +148,7 @@ impl ImportedTexture {
                 Height: desc.Height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: Dxgi::Common::DXGI_FORMAT_NV12,
+                Format: desc.Format,
                 SampleDesc: Dxgi::Common::DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,
@@ -151,7 +184,7 @@ impl ImportedTexture {
                 Height: desc.Height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: Dxgi::Common::DXGI_FORMAT_NV12,
+                Format: desc.Format,
                 SampleDesc: Dxgi::Common::DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,
@@ -177,6 +210,9 @@ impl ImportedTexture {
         handle: HANDLE,
     ) -> Result<wgpu::Texture> {
         unsafe {
+            let format =
+                get_dxgi_yuv_format(desc.Format).unwrap(/* invariant by Self::new_d3d12 */);
+
             let hal_device = device.as_hal::<wgpu::hal::dx12::Api>().unwrap();
             let mut d3d12_texture: Option<D3D12::ID3D12Resource> = None;
             hal_device
@@ -188,7 +224,7 @@ impl ImportedTexture {
             };
             let hal_texture = wgpu::hal::dx12::Device::texture_from_raw(
                 d3d12_texture,
-                wgpu::TextureFormat::NV12,
+                format,
                 wgpu::TextureDimension::D2,
                 wgpu::Extent3d {
                     width: desc.Width,
@@ -211,9 +247,9 @@ impl ImportedTexture {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::NV12,
+                    format,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[wgpu::TextureFormat::NV12],
+                    view_formats: &[],
                 },
             ))
         }
@@ -225,6 +261,9 @@ impl ImportedTexture {
         handle: HANDLE,
     ) -> Result<wgpu::Texture> {
         unsafe {
+            let format =
+                get_dxgi_yuv_format(desc.Format).unwrap(/* invariant by Self::new_vulkan */);
+
             let hal_device = device.as_hal::<wgpu::hal::vulkan::Api>().unwrap();
             let hal_texture = hal_device
                 .texture_from_d3d11_shared_handle(
@@ -239,7 +278,7 @@ impl ImportedTexture {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::NV12,
+                        format,
                         usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_DST,
                         memory_flags: wgpu::hal::MemoryFlags::empty(),
                         view_formats: vec![],
@@ -259,9 +298,9 @@ impl ImportedTexture {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::NV12,
+                    format,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[wgpu::TextureFormat::NV12],
+                    view_formats: &[],
                 },
             ))
         }
@@ -271,6 +310,9 @@ impl ImportedTexture {
         device: &wgpu::Device,
         desc: &D3D11::D3D11_TEXTURE2D_DESC,
     ) -> (wgpu::Texture, wgpu::Texture) {
+        let [y_format, uv_format] =
+            get_dxgi_planar_format(desc.Format).unwrap(/* invariant by Self::new_cpu */);
+
         let texture_y = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -281,7 +323,7 @@ impl ImportedTexture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: y_format,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -296,7 +338,7 @@ impl ImportedTexture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
+            format: uv_format,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -307,7 +349,7 @@ impl ImportedTexture {
     unsafe fn on_copy(&self, queue: &wgpu::Queue, d3d11_device: &D3D11::ID3D11Device) {
         match &self.destination {
             /* do nothing - the changes to the shared D3D11 texture will be visible in the wgpu texture */
-            TextureDestination::ExternalNV12 => {}
+            TextureDestination::ExternalYUV => {}
             TextureDestination::PlanarCopy {
                 y_texture,
                 uv_texture,
@@ -482,7 +524,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                 self.imported_texture.insert(imported_texture)
             };
 
-            if let TextureDestination::ExternalNV12 = &imported_texture.destination {
+            if let TextureDestination::ExternalYUV = &imported_texture.destination {
                 imported_texture
                     .shared_texture
                     .cast::<Dxgi::IDXGIKeyedMutex>()
@@ -503,7 +545,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
                     frame.data[1] as u32,
                     None,
                 );
-            if let TextureDestination::ExternalNV12 = imported_texture.destination {
+            if let TextureDestination::ExternalYUV = imported_texture.destination {
                 imported_texture
                     .shared_texture
                     .cast::<Dxgi::IDXGIKeyedMutex>()
@@ -531,7 +573,7 @@ impl HardwareDecoder for D3D11VAHardwareDecoder {
             .as_ref()
             .map(|imported| &imported.destination)
         {
-            Some(TextureDestination::ExternalNV12) => "D3D11VA zero-copy",
+            Some(TextureDestination::ExternalYUV) => "D3D11VA zero-copy",
             Some(TextureDestination::PlanarCopy { .. }) => "D3D11VA software copy",
             None => "D3D11VA",
         }

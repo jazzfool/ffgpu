@@ -10,6 +10,7 @@ pub enum Error {
     HardwareContext,
     InvalidFrame,
     TextureShare,
+    UnsupportedPixelFormat,
     Unknown,
 }
 
@@ -24,6 +25,7 @@ impl fmt::Display for Error {
             Error::HardwareContext => f.write_str("hardware context error"),
             Error::InvalidFrame => f.write_str("AVFrame contains invalid data"),
             Error::TextureShare => f.write_str("failed to share texture with wgpu"),
+            Error::UnsupportedPixelFormat => f.write_str("unsupported frame pixel format"),
             Error::Unknown => f.write_str("unknown error"),
         }
     }

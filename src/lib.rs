@@ -15,9 +15,16 @@ pub use video::{SeekMode, Video};
 pub fn required_wgpu_device_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     match adapter.get_info().backend {
         wgpu::Backend::Vulkan => {
-            wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::VULKAN_EXTERNAL_MEMORY_WIN32
+            wgpu::Features::TEXTURE_FORMAT_NV12
+                | wgpu::Features::TEXTURE_FORMAT_P010
+                | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+                | wgpu::Features::VULKAN_EXTERNAL_MEMORY_WIN32
         }
-        wgpu::Backend::Dx12 => wgpu::Features::TEXTURE_FORMAT_NV12,
+        wgpu::Backend::Dx12 => {
+            wgpu::Features::TEXTURE_FORMAT_NV12
+                | wgpu::Features::TEXTURE_FORMAT_P010
+                | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+        }
         _ => wgpu::Features::empty(),
     }
 }
