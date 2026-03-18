@@ -5,8 +5,8 @@ pub(crate) mod video;
 
 pub use context::Context;
 pub use decode::{
-    audio::{AudioInfo, AudioParameters, AudioSink, DeviceAudioSink},
-    video::VideoInfo,
+    audio::{AudioMetadata, AudioParameters, AudioSink, DeviceAudioSink},
+    video::VideoMetadata,
 };
 pub use error::{Error, Result};
 pub use video::{SeekMode, Video};

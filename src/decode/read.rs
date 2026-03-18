@@ -1,5 +1,6 @@
 use crate::{
-    decode::{DecoderState, FrameQueue, PacketSender, PlayState},
+    SeekMode,
+    decode::{DecoderState, PlayState, audio, video},
     error::Result,
 };
 use crossbeam_channel::Receiver;
@@ -28,36 +29,20 @@ impl Input {
 
 #[derive(Debug)]
 pub(crate) enum ReadMessage {
-    SeekStream(i64),
+    SeekStream { ts: i64, mode: SeekMode },
 }
 
 pub(crate) struct ReadThread {
     input: Input,
     state: Arc<DecoderState>,
-    video_tx: PacketSender,
-    audio_tx: PacketSender,
-    video_frame_queue: FrameQueue,
-    audio_frame_queue: FrameQueue,
     messages: Receiver<ReadMessage>,
 }
 
 impl ReadThread {
-    pub fn new(
-        input: Input,
-        pbs: Arc<DecoderState>,
-        video_tx: PacketSender,
-        audio_tx: PacketSender,
-        video_frame_queue: FrameQueue,
-        audio_frame_queue: FrameQueue,
-        messages: Receiver<ReadMessage>,
-    ) -> Self {
+    pub fn new(input: Input, pbs: Arc<DecoderState>, messages: Receiver<ReadMessage>) -> Self {
         ReadThread {
             input,
             state: pbs,
-            video_tx,
-            audio_tx,
-            video_frame_queue,
-            audio_frame_queue,
             messages,
         }
     }
@@ -85,7 +70,7 @@ impl ReadThread {
 
             while let Ok(message) = self.messages.try_recv() {
                 match message {
-                    ReadMessage::SeekStream(ts) => {
+                    ReadMessage::SeekStream { ts, mode } => {
                         if let Err(error) = {
                             let err = unsafe {
                                 ff::avformat_seek_file(
@@ -104,13 +89,27 @@ impl ReadThread {
                         } else {
                             self.state.is_eof.store(false, Ordering::SeqCst);
 
-                            self.video_tx.flush();
-                            self.video_tx
-                                .push_null(ffn::Packet::empty(), video_stream.index);
+                            video_stream.packets.flush();
+                            video_stream
+                                .packets
+                                .push_null(ffn::Packet::empty(), video_stream.metadata.index);
 
-                            self.audio_tx.flush();
-                            self.audio_tx
-                                .push_null(ffn::Packet::empty(), audio_stream.index);
+                            audio_stream.packets.flush();
+                            audio_stream
+                                .packets
+                                .push_null(ffn::Packet::empty(), audio_stream.metadata.index);
+
+                            match mode {
+                                SeekMode::Accurate => {
+                                    let _ = video_stream
+                                        .messages
+                                        .send(video::Message::SkipToTimestamp(ts));
+                                    let _ = audio_stream
+                                        .messages
+                                        .send(audio::Message::SkipToTimestamp(ts));
+                                }
+                                _ => {}
+                            }
 
                             if play_state == PlayState::Paused {
                                 self.state
@@ -122,10 +121,14 @@ impl ReadThread {
                 }
             }
 
-            if (self.video_tx.tx.len() + self.audio_tx.tx.len()/*+ self.subtitle_tx.packets.len()*/)
+            if (video_stream.packets.tx.len() + audio_stream.packets.tx.len()/*+ self.subtitle_tx.packets.len()*/)
                 > MAX_QUEUE_SIZE
-                || (self.video_tx.has_enough_packets(video_stream.time_base)
-                    && self.audio_tx.has_enough_packets(audio_stream.time_base))
+                || (video_stream
+                    .packets
+                    .has_enough_packets(video_stream.metadata.time_base)
+                    && audio_stream
+                        .packets
+                        .has_enough_packets(audio_stream.metadata.time_base))
             {
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
@@ -133,9 +136,7 @@ impl ReadThread {
 
             let is_eof = self.state.is_eof.load(Ordering::SeqCst);
 
-            if play_state == PlayState::Playing
-                && is_eof
-                && self.video_frame_queue.queue_rx.is_empty()
+            if play_state == PlayState::Playing && is_eof && video_stream.frames.queue_rx.is_empty()
             {
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
@@ -152,10 +153,12 @@ impl ReadThread {
                             || unsafe { ff::avio_feof((*self.input.format_ctx.as_ptr()).pb) != 0 })
                     {
                         // flush
-                        self.video_tx
-                            .push_null(ffn::Packet::empty(), video_stream.index);
-                        self.audio_tx
-                            .push_null(ffn::Packet::empty(), audio_stream.index);
+                        video_stream
+                            .packets
+                            .push_null(ffn::Packet::empty(), video_stream.metadata.index);
+                        audio_stream
+                            .packets
+                            .push_null(ffn::Packet::empty(), audio_stream.metadata.index);
                         // self.subtitle_q.push_null();
 
                         self.state.is_eof.store(true, Ordering::SeqCst);
@@ -172,10 +175,10 @@ impl ReadThread {
             }
 
             let stream_index = packet.stream();
-            if stream_index == video_stream.index {
-                self.video_tx.push(packet);
-            } else if stream_index == audio_stream.index {
-                self.audio_tx.push(packet);
+            if stream_index == video_stream.metadata.index {
+                video_stream.packets.push(packet);
+            } else if stream_index == audio_stream.metadata.index {
+                audio_stream.packets.push(packet);
             }
 
             // TODO: handle subtitle packets

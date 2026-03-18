@@ -1,13 +1,13 @@
 use crate::{
     context::pipeline_cache::PipelineCache,
     decode::{
-        Clock, DecoderState, FrameQueue, PacketReceiver, PlayState,
+        Clock, DecoderState, FrameQueue, PacketReceiver, PacketSender, PlayState,
         hw::{HardwareDecoder, NativeDecoder},
         read::Input,
     },
     error::{Error, Result},
 };
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use ffmpeg_next::{self as ffn, sys as ff};
 use std::{
     pin::Pin,
@@ -142,7 +142,7 @@ impl FrameDecoder {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VideoInfo {
+pub struct VideoMetadata {
     pub index: usize,
     pub time_base: ffn::Rational,
     pub framerate: ffn::Rational,
@@ -151,7 +151,7 @@ pub struct VideoInfo {
     pub duration: Duration,
 }
 
-impl Default for VideoInfo {
+impl Default for VideoMetadata {
     fn default() -> Self {
         Self {
             index: usize::MAX,
@@ -164,10 +164,17 @@ impl Default for VideoInfo {
     }
 }
 
+pub(crate) struct VideoStream {
+    pub metadata: VideoMetadata,
+    pub messages: Sender<Message>,
+    pub packets: PacketSender,
+    pub frames: FrameQueue,
+}
+
 pub(crate) struct Decoder {
     pub decoder: ffn::decoder::Video,
     pub hwctx: NonNull<ff::AVBufferRef>,
-    pub info: VideoInfo,
+    pub metadata: VideoMetadata,
     _decoder_data: Pin<Box<DecoderData>>,
 }
 
@@ -248,7 +255,7 @@ impl Decoder {
             height as _,
         )?;
 
-        let info = VideoInfo {
+        let metadata = VideoMetadata {
             index: video_stream_index,
             time_base: video_stream.time_base(),
             framerate: video_stream.avg_frame_rate(),
@@ -264,7 +271,7 @@ impl Decoder {
             Decoder {
                 decoder: decoder_ctx,
                 hwctx,
-                info,
+                metadata,
                 _decoder_data: decoder_data,
             },
             frame_decoder,
@@ -348,7 +355,7 @@ impl VideoThread {
                             let av_pts = unsafe {
                                 ff::av_rescale_q(
                                     pts,
-                                    self.decoder.info.time_base.into(),
+                                    self.decoder.metadata.time_base.into(),
                                     ff::AV_TIME_BASE_Q,
                                 )
                             };
@@ -372,7 +379,7 @@ impl VideoThread {
                                 prev_frame = None;
                             }
 
-                            let pts_sec = pts as f64 * f64::from(self.decoder.info.time_base);
+                            let pts_sec = pts as f64 * f64::from(self.decoder.metadata.time_base);
                             if let Some(master) = self.master_clock.get() {
                                 // drop early frame
                                 let diff = pts_sec - master;

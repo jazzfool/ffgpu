@@ -3,16 +3,15 @@ pub(crate) mod hw;
 pub(crate) mod read;
 pub(crate) mod video;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
-};
-
-use crate::decode::{audio::AudioInfo, video::VideoInfo};
+use crate::decode::{audio::AudioStream, video::VideoStream};
 use arc_swap::ArcSwap;
 use atomic_float::AtomicF64;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use ffmpeg_next::{self as ffn, sys as ff};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
+};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,20 +27,20 @@ pub(crate) struct DecoderState {
     pub(crate) is_eof: AtomicBool,
     pub(crate) current_pts: AtomicI64,
 
-    pub(crate) video_stream: ArcSwap<VideoInfo>,
-    pub(crate) audio_stream: ArcSwap<AudioInfo>,
+    pub(crate) video_stream: ArcSwap<VideoStream>,
+    pub(crate) audio_stream: ArcSwap<AudioStream>,
 }
 
 impl DecoderState {
-    pub fn new() -> Self {
+    pub fn new(video: VideoStream, audio: AudioStream) -> Self {
         DecoderState {
             alive: AtomicBool::new(true),
             play_state: AtomicU8::new(PlayState::Playing as u8),
             is_eof: AtomicBool::new(false),
             current_pts: AtomicI64::new(0),
 
-            video_stream: ArcSwap::new(Default::default()),
-            audio_stream: ArcSwap::new(Default::default()),
+            video_stream: ArcSwap::new(Arc::new(video)),
+            audio_stream: ArcSwap::new(Arc::new(audio)),
         }
     }
 
@@ -64,16 +63,16 @@ pub(crate) struct PacketQueueMetadata {
     pub serial: AtomicU32,
 }
 
-struct Packet {
+pub(crate) struct Packet {
     pub packet: ffn::Packet,
     pub serial: u32,
 }
 
 #[derive(Clone)]
 pub(crate) struct PacketSender {
-    metadata: Arc<PacketQueueMetadata>,
-    rx: Receiver<Packet>,
-    tx: Sender<Packet>,
+    pub metadata: Arc<PacketQueueMetadata>,
+    pub rx: Receiver<Packet>,
+    pub tx: Sender<Packet>,
 }
 
 impl PacketSender {

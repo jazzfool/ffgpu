@@ -1,7 +1,7 @@
 use crate::{
     context::pipeline_cache::PipelineCache,
     decode::{
-        Clock, DecoderState, Frame, FrameQueue, PacketQueueMetadata, PlayState,
+        Clock, DecoderState, Frame, FrameQueue, PlayState,
         audio::{self, AudioDecoder, AudioSink, AudioThread},
         hw::HardwareDecoder,
         packet_queue,
@@ -46,11 +46,7 @@ pub struct Video {
     queue: wgpu::Queue,
 
     state: Arc<DecoderState>,
-    video_queue: Arc<PacketQueueMetadata>,
-    audio_queue: Arc<PacketQueueMetadata>,
     frame_decoder: video::FrameDecoder,
-    video_frame_queue: FrameQueue,
-    audio_frame_queue: FrameQueue,
     read_thread: Option<JoinHandle<()>>,
     video_thread: Option<JoinHandle<()>>,
     audio_thread: Option<JoinHandle<()>>,
@@ -58,8 +54,6 @@ pub struct Video {
     audio_clock: Arc<Clock>,
 
     read_messages: Sender<ReadMessage>,
-    video_messages: Sender<video::Message>,
-    audio_messages: Sender<audio::Message>,
 
     looping: bool,
     frame_timer: f64,
@@ -88,10 +82,6 @@ impl Video {
 
         let audio_decoder = AudioDecoder::new(&mut input)?;
 
-        let state = Arc::new(DecoderState::new());
-        state.video_stream.store(Arc::new(video_decoder.info));
-        state.audio_stream.store(Arc::new(audio_decoder.info));
-
         let (video_tx, video_rx, video_queue) = packet_queue();
         let (audio_tx, audio_rx, audio_queue) = packet_queue();
         let video_frame_queue = FrameQueue::new(18);
@@ -101,31 +91,38 @@ impl Video {
         let audio_clock = Arc::new(Clock::new(audio_queue.clone()));
 
         let (read_msg_tx, read_msg_rx) = unbounded();
-
-        let read_thread = ReadThread::new(
-            input,
-            state.clone(),
-            video_tx,
-            audio_tx,
-            video_frame_queue.clone(),
-            audio_frame_queue.clone(),
-            read_msg_rx,
-        )
-        .run();
-
         let (video_msg_tx, video_msg_rx) = unbounded();
+        let (audio_msg_tx, audio_msg_rx) = unbounded();
+
+        let video_stream = video::VideoStream {
+            metadata: video_decoder.metadata,
+            messages: video_msg_tx,
+            packets: video_tx,
+            frames: video_frame_queue.clone(),
+        };
+
+        let audio_stream = audio::AudioStream {
+            metadata: audio_decoder.metadata,
+            messages: audio_msg_tx.clone(),
+            packets: audio_tx,
+            frames: audio_frame_queue.clone(),
+        };
+
+        let state = Arc::new(DecoderState::new(video_stream, audio_stream));
+
+        let read_thread = ReadThread::new(input, state.clone(), read_msg_rx).run();
+
         let video_thread = video::VideoThread::new(
             video_decoder,
             state.clone(),
             video_rx,
-            video_frame_queue.clone(),
+            video_frame_queue,
             video_msg_rx,
             video_clock.clone(),
             audio_clock.clone(),
         )
         .run();
 
-        let (audio_msg_tx, audio_msg_rx) = unbounded();
         let audio_thread = AudioThread::new(
             audio_decoder,
             state.clone(),
@@ -151,11 +148,7 @@ impl Video {
                 queue,
 
                 state,
-                video_queue,
-                audio_queue,
                 frame_decoder,
-                video_frame_queue,
-                audio_frame_queue,
                 read_thread: Some(read_thread),
                 video_thread: Some(video_thread),
                 audio_thread: Some(audio_thread),
@@ -163,8 +156,6 @@ impl Video {
                 audio_clock,
 
                 read_messages: read_msg_tx,
-                video_messages: video_msg_tx,
-                audio_messages: audio_msg_tx,
 
                 looping: false,
                 frame_timer: 0.0,
@@ -190,7 +181,16 @@ impl Video {
     ) -> Result<FrameResponse> {
         let time = ffn::time::relative() as f64 / 1000000.0;
 
-        if frame.serial != self.video_queue.serial.load(Ordering::SeqCst) {
+        if frame.serial
+            != self
+                .state
+                .video_stream
+                .load()
+                .packets
+                .metadata
+                .serial
+                .load(Ordering::SeqCst)
+        {
             self.frame_timer = time;
             return Ok(FrameResponse::Retry);
         }
@@ -242,8 +242,8 @@ impl Video {
             self.frame_timer = time;
         }
 
-        let pts_sec =
-            best_effort_timestamp as f64 * f64::from(self.state.video_stream.load().time_base);
+        let pts_sec = best_effort_timestamp as f64
+            * f64::from(self.state.video_stream.load().metadata.time_base);
         self.video_clock.set(pts_sec, frame.serial, None);
 
         if self.state.play_state() != PlayState::Step
@@ -275,11 +275,11 @@ impl Video {
 
     fn flush(&mut self) {
         if let Some(queued_frame) = self.queued_frame.take() {
-            self.video_frame_queue.release(queued_frame);
+            self.state.video_stream.load().frames.release(queued_frame);
         }
 
-        self.video_frame_queue.flush();
-        self.audio_frame_queue.flush();
+        self.state.video_stream.load().frames.flush();
+        self.state.audio_stream.load().frames.flush();
 
         // TODO: flush samples in AudioSink
     }
@@ -300,7 +300,9 @@ impl Video {
             self.frame_decoder.copy_to_rgb(encoder);
         }
 
-        if self.video_frame_queue.queued_len() == 0
+        let video_frame_queue = self.state.video_stream.load().frames.clone();
+
+        if video_frame_queue.queued_len() == 0
             && self.state.is_eof.load(Ordering::SeqCst)
             && self.looping
             && play_state != PlayState::Paused
@@ -309,7 +311,7 @@ impl Video {
             self.seek(Duration::ZERO, SeekMode::Fast);
         }
 
-        if play_state == PlayState::Paused || self.video_frame_queue.queued_len() == 0 {
+        if play_state == PlayState::Paused || video_frame_queue.queued_len() == 0 {
             return Ok(Duration::from_millis(50));
         }
 
@@ -317,24 +319,24 @@ impl Video {
 
         let mut duration = Duration::from_secs_f64(f64::from(video_info.framerate.invert()));
         loop {
-            let queued_len = self.video_frame_queue.queued_len();
+            let queued_len = video_frame_queue.queued_len();
             let frame = self
                 .queued_frame
                 .take()
-                .or_else(|| self.video_frame_queue.try_next());
+                .or_else(|| video_frame_queue.try_next());
             if let Some(frame) = frame {
                 let response = self.update_frame(encoder, &frame, queued_len, &mut duration)?;
                 match response {
                     FrameResponse::Continue => {
                         self.last_pts = unsafe { (*frame.frame.as_ptr()).best_effort_timestamp };
                         self.last_serial = frame.serial;
-                        self.video_frame_queue.release(frame);
+                        video_frame_queue.release(frame);
                         break;
                     }
                     FrameResponse::Retry => {
                         self.last_pts = unsafe { (*frame.frame.as_ptr()).best_effort_timestamp };
                         self.last_serial = frame.serial;
-                        self.video_frame_queue.release(frame);
+                        video_frame_queue.release(frame);
                     }
                     FrameResponse::Requeue => {
                         self.queued_frame = Some(frame);
@@ -349,8 +351,8 @@ impl Video {
         Ok(duration)
     }
 
-    fn video_info(&self) -> video::VideoInfo {
-        *self.state.video_stream.load().clone()
+    fn video_info(&self) -> video::VideoMetadata {
+        self.state.video_stream.load().metadata
     }
 
     pub fn statistics(&self) -> Statistics {
@@ -401,23 +403,14 @@ impl Video {
         let position = position.min(self.duration());
         let ts = (position.as_secs_f64() * ff::AV_TIME_BASE as f64) as i64;
 
-        if let Err(error) = self.read_messages.send(ReadMessage::SeekStream(ts)) {
+        if let Err(error) = self
+            .read_messages
+            .send(ReadMessage::SeekStream { ts, mode })
+        {
             log::error!("failed to send seek message: {}", error);
         }
 
         self.flush();
-
-        match mode {
-            SeekMode::Accurate => {
-                let _ = self
-                    .video_messages
-                    .send(video::Message::SkipToTimestamp(ts));
-                let _ = self
-                    .audio_messages
-                    .send(audio::Message::SkipToTimestamp(ts));
-            }
-            _ => {}
-        }
     }
 
     pub fn paused(&self) -> bool {

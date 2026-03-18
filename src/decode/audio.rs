@@ -1,7 +1,7 @@
 use crate::{
     decode::{
-        Clock, DecoderState, Frame, FrameQueue, PacketQueueMetadata, PacketReceiver, PlayState,
-        read::Input,
+        Clock, DecoderState, Frame, FrameQueue, PacketQueueMetadata, PacketReceiver, PacketSender,
+        PlayState, read::Input,
     },
     error::{Error, Result},
 };
@@ -27,7 +27,7 @@ pub struct AudioParameters {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioInfo {
+pub struct AudioMetadata {
     pub index: usize,
     pub time_base: ffn::Rational,
     pub sample_rate: u32,
@@ -37,12 +37,12 @@ pub struct AudioInfo {
     pub(crate) frame_size: u32,
 }
 
-unsafe impl Send for AudioInfo {}
-unsafe impl Sync for AudioInfo {}
+unsafe impl Send for AudioMetadata {}
+unsafe impl Sync for AudioMetadata {}
 
-impl Default for AudioInfo {
+impl Default for AudioMetadata {
     fn default() -> Self {
-        AudioInfo {
+        AudioMetadata {
             index: usize::MAX,
             time_base: ffn::Rational::new(0, 1),
             sample_rate: 0,
@@ -54,9 +54,16 @@ impl Default for AudioInfo {
     }
 }
 
+pub(crate) struct AudioStream {
+    pub metadata: AudioMetadata,
+    pub messages: Sender<Message>,
+    pub packets: PacketSender,
+    pub frames: FrameQueue,
+}
+
 pub(crate) struct AudioDecoder {
     pub decoder: ffn::decoder::Audio,
-    pub info: AudioInfo,
+    pub metadata: AudioMetadata,
 }
 
 impl AudioDecoder {
@@ -87,7 +94,7 @@ impl AudioDecoder {
         let channel_layout = decoder.channel_layout();
         let frame_size = decoder.frame_size();
 
-        let info = AudioInfo {
+        let metadata = AudioMetadata {
             index: stream_index,
             time_base: decoder.time_base(),
             sample_rate,
@@ -97,7 +104,7 @@ impl AudioDecoder {
             frame_size,
         };
 
-        Ok(AudioDecoder { decoder, info })
+        Ok(AudioDecoder { decoder, metadata })
     }
 }
 
@@ -151,7 +158,7 @@ impl AudioThread {
             .as_ref()
             .is_none_or(|resampler| resampler.parameters != parameters)
         {
-            let audio_info = self.state.audio_stream.load().as_ref().clone();
+            let stream = self.state.audio_stream.load().clone();
 
             let format = ffn::format::Sample::F32(ffn::format::sample::Type::Packed);
             let channel_layout = ffn::ChannelLayout(ff::AVChannelLayout {
@@ -165,16 +172,17 @@ impl AudioThread {
 
             let resampler = ffn::software::resampler(
                 (
-                    audio_info.format,
-                    audio_info.channel_layout,
-                    audio_info.sample_rate,
+                    stream.metadata.format,
+                    stream.metadata.channel_layout,
+                    stream.metadata.sample_rate,
                 ),
                 (format, channel_layout, parameters.sample_rate),
             )?;
 
             let frame = ffn::util::frame::Audio::new(
                 format,
-                (audio_info.frame_size * parameters.sample_rate / audio_info.sample_rate) as _,
+                (stream.metadata.frame_size * parameters.sample_rate / stream.metadata.sample_rate)
+                    as _,
                 channel_layout,
             );
 
@@ -211,6 +219,10 @@ impl AudioThread {
             let mut prev_frame = None;
 
             while self.state.alive.load(Ordering::Relaxed) {
+                if packet_serial != self.audio_rx.metadata.serial.load(Ordering::Relaxed) {
+                    self.flush();
+                }
+
                 if self.frame_queue.free_rx.is_empty() {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
@@ -222,7 +234,7 @@ impl AudioThread {
                             let av_pts = unsafe {
                                 ff::av_rescale_q(
                                     pts,
-                                    self.decoder.info.time_base.into(),
+                                    self.decoder.metadata.time_base.into(),
                                     ff::AV_TIME_BASE_Q,
                                 )
                             };
@@ -281,7 +293,8 @@ impl AudioThread {
                             )
                         };
 
-                        let resampled_pts = resampled_pts / self.decoder.info.sample_rate as i64;
+                        let resampled_pts =
+                            resampled_pts / self.decoder.metadata.sample_rate as i64;
 
                         if audio_frame.channel_layout().0.order
                             == ff::AVChannelOrder::AV_CHANNEL_ORDER_UNSPEC
@@ -408,11 +421,11 @@ impl AudioSink {
     }
 
     pub fn sample_rate(&self) -> u32 {
-        self.state.audio_stream.load().sample_rate
+        self.state.audio_stream.load().metadata.sample_rate
     }
 
     pub fn channels(&self) -> u16 {
-        self.state.audio_stream.load().channels
+        self.state.audio_stream.load().metadata.channels
     }
 
     pub fn read_to_slice(&mut self, out: &mut [f32], gain: f32) -> Result<()> {
@@ -456,7 +469,7 @@ impl AudioSink {
             }
 
             self.last_pts = if let Some(pts) = frame.pts() {
-                pts as f64 * f64::from(self.state.audio_stream.load().time_base)
+                pts as f64 * f64::from(self.state.audio_stream.load().metadata.time_base)
                     + frame.samples() as f64 / frame.rate() as f64
             } else {
                 f64::NAN
