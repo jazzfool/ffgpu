@@ -6,7 +6,7 @@ use std::{
 use winit::{
     dpi::LogicalSize,
     event::{ElementState, Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };
@@ -165,6 +165,7 @@ fn main() {
     text_buffer_2.shape_until_scroll(&mut font_system, false);
 
     let mut wait_until = Instant::now();
+    let mut next_text_update = Instant::now();
 
     let window = &window;
     event_loop
@@ -206,31 +207,35 @@ fn main() {
                         Some(window.inner_size().height as f32 * window.scale_factor() as f32),
                     );
 
-                    text_buffer_1.set_text(
-                        &mut font_system,
-                        &format!(
-                            "{}\n{}x{}@{:.02}fps\n{}\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\n{:.0}% volume\ndelay {:#?}\nvideo clk: {:.03}\naudio clk: {:.03}\na/v sync: {:+04.0}ms",
-                            &path,
-                            video.width(),
-                            video.height(),
-                            video.framerate(),
-                            video.decoder_name(),
-                            if video.paused() { "paused" } else { "playing" },
-                            if video.looping() { "on" } else { "off" },
-                            video.position().as_secs() / 60,
-                            video.position().as_secs() % 60,
-                            video.position().as_millis() % 1000,
-                            (audio_sink.gain() * 100.).round(),
-                            wait,
-                            stats.video_clock,
-                            stats.audio_clock,
-                            (stats.sync_latency * 1000.).round(),
-                        ),
-                        &glyphon::Attrs::new().family(glyphon::Family::Monospace),
-                        glyphon::Shaping::Basic,
-                        None,
-                    );
-                    text_buffer_1.shape_until_scroll(&mut font_system, false);
+                    if now >= next_text_update {
+                        next_text_update = now + Duration::from_millis(50);
+
+                        text_buffer_1.set_text(
+                            &mut font_system,
+                            &format!(
+                                "{}\n{}x{}@{:.02}fps\n{}\n{}\nlooping {}\n\n{:0>2}:{:0>2}.{:0>3}\n{:.0}% volume\ndelay {:#?}\nvideo clk: {:.03}\naudio clk: {:.03}\na/v sync: {:+04.0}ms",
+                                &path,
+                                video.width(),
+                                video.height(),
+                                video.framerate(),
+                                video.decoder_name(),
+                                if video.paused() { "paused" } else { "playing" },
+                                if video.looping() { "on" } else { "off" },
+                                video.position().as_secs() / 60,
+                                video.position().as_secs() % 60,
+                                video.position().as_millis() % 1000,
+                                (audio_sink.gain() * 100.).round(),
+                                wait,
+                                stats.video_clock,
+                                stats.audio_clock,
+                                (stats.sync_latency * 1000.).round(),
+                            ),
+                            &glyphon::Attrs::new().family(glyphon::Family::Monospace),
+                            glyphon::Shaping::Basic,
+                            None,
+                        );
+                        text_buffer_1.shape_until_scroll(&mut font_system, false);
+                    }
 
                     text_viewport.update(
                         &queue,
