@@ -437,7 +437,7 @@ impl VideoThread {
                     break 'exit;
                 }
 
-                let Some(packet) = self.video_rx.try_receive() else {
+                let Some(packet) = self.video_rx.receive() else {
                     continue;
                 };
 

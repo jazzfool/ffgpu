@@ -183,6 +183,16 @@ impl ReadThread {
 
             // TODO: handle subtitle packets
         }
+
+        // force the other threads to wake up in order to exit from alive=false
+        let video_stream = self.state.video_stream.load().clone();
+        let audio_stream = self.state.audio_stream.load().clone();
+        video_stream
+            .packets
+            .push_null(ffn::Packet::empty(), video_stream.metadata.index);
+        audio_stream
+            .packets
+            .push_null(ffn::Packet::empty(), audio_stream.metadata.index);
     }
 
     pub fn run(mut self) -> JoinHandle<()> {

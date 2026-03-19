@@ -113,8 +113,8 @@ pub(crate) struct PacketReceiver {
 }
 
 impl PacketReceiver {
-    fn try_receive(&self) -> Option<Packet> {
-        let Ok(recv) = self.rx.try_recv() else {
+    fn receive(&self) -> Option<Packet> {
+        let Ok(recv) = self.rx.recv() else {
             return None;
         };
         self.metadata

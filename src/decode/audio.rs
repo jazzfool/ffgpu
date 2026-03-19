@@ -338,7 +338,7 @@ impl AudioThread {
                     break 'exit;
                 }
 
-                let Some(packet) = self.audio_rx.try_receive() else {
+                let Some(packet) = self.audio_rx.receive() else {
                     continue;
                 };
 
@@ -441,7 +441,6 @@ impl AudioSink {
 
         while self.samples.len() < out.len() {
             let Some(frame) = self.frame_queue.try_next() else {
-                log::warn!("insufficient audio samples to read");
                 return Ok(());
             };
 
