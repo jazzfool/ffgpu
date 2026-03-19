@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 use winit::{
-    dpi::LogicalSize,
+    dpi::PhysicalSize,
     event::{ElementState, Event, WindowEvent},
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
@@ -46,7 +46,7 @@ fn main() {
     let (mut video, audio_sink) = context.create_video(&path).unwrap();
     let audio_sink = audio_sink.into_device_sink();
 
-    let _ = window.request_inner_size(LogicalSize::new(video.width(), video.height()));
+    let _ = window.request_inner_size(PhysicalSize::new(video.width(), video.height()));
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
