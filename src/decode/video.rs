@@ -107,10 +107,10 @@ impl Decoder {
         let decoder_data = if device_type != ff::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
             let mut hw_pixel_format = ff::AVPixelFormat::AV_PIX_FMT_NONE;
             for i in 0..16 {
-                let config = unsafe {
-                    ff::avcodec_get_hw_config(decoder.as_ptr(), i)
-                        .as_ref()
-                        .ok_or(Error::MissingCodec(video_codec.name()))?
+                let Some(config) =
+                    (unsafe { ff::avcodec_get_hw_config(decoder.as_ptr(), i).as_ref() })
+                else {
+                    break;
                 };
                 if (config.methods & ff::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32) != 0
                     && config.device_type == device_type
@@ -120,26 +120,36 @@ impl Decoder {
                 }
             }
 
-            let mut decoder_data = Box::pin(DecoderData {
-                hw_pixel_format,
-                unsupported: unsupported.clone(),
-            });
-            unsafe {
-                (*decoder_ctx.as_mut_ptr()).opaque = (&mut *decoder_data) as *mut _ as _;
-                (*decoder_ctx.as_mut_ptr()).get_format = Some(get_hw_format);
-            };
+            if hw_pixel_format == ff::AVPixelFormat::AV_PIX_FMT_NONE {
+                log::error!(
+                    "{:#?} does not support codec {}",
+                    device_type,
+                    video_codec.name()
+                );
+                log::warn!("using software decode");
+                None
+            } else {
+                let mut decoder_data = Box::pin(DecoderData {
+                    hw_pixel_format,
+                    unsupported: unsupported.clone(),
+                });
+                unsafe {
+                    (*decoder_ctx.as_mut_ptr()).opaque = (&mut *decoder_data) as *mut _ as _;
+                    (*decoder_ctx.as_mut_ptr()).get_format = Some(get_hw_format);
+                };
 
-            let mut hwctx = null_mut();
-            unsafe {
-                ff::av_hwdevice_ctx_create(&mut hwctx, device_type, null_mut(), null_mut(), 0)
-            };
+                let mut hwctx = null_mut();
+                unsafe {
+                    ff::av_hwdevice_ctx_create(&mut hwctx, device_type, null_mut(), null_mut(), 0)
+                };
 
-            let hwctx = NonNull::new(hwctx).ok_or(Error::HardwareContext)?;
-            unsafe {
-                (*decoder_ctx.as_mut_ptr()).hw_device_ctx = ff::av_buffer_ref(hwctx.as_ptr());
+                let hwctx = NonNull::new(hwctx).ok_or(Error::HardwareContext)?;
+                unsafe {
+                    (*decoder_ctx.as_mut_ptr()).hw_device_ctx = ff::av_buffer_ref(hwctx.as_ptr());
+                }
+
+                Some(decoder_data)
             }
-
-            Some(decoder_data)
         } else {
             None
         };

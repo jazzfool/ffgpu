@@ -22,7 +22,9 @@ impl Context {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Self {
+    ) -> Result<Self> {
+        ffmpeg_next::init()?;
+
         let instance = instance.clone();
         let adapter = adapter.clone();
         let device = device.clone();
@@ -30,13 +32,13 @@ impl Context {
 
         let pipeline_cache = Arc::new(Mutex::new(PipelineCache::new(device.clone())));
 
-        Context {
+        Ok(Context {
             instance,
             adapter,
             device,
             queue,
             pipeline_cache,
-        }
+        })
     }
 
     pub fn create_video<P>(&mut self, path: &P) -> Result<(Video, AudioSink)>

@@ -42,7 +42,7 @@ fn main() {
     .unwrap();
 
     let path = std::env::args().nth(1).expect("no path given");
-    let mut context = ffgpu::Context::new(&instance, &adapter, &device, &queue);
+    let mut context = ffgpu::Context::new(&instance, &adapter, &device, &queue).unwrap();
     let (mut video, audio_sink) = context.create_video(&path).unwrap();
     let audio_sink = audio_sink.into_device_sink();
 

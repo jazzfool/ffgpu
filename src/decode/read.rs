@@ -27,7 +27,6 @@ impl Input {
     where
         P: AsRef<Path> + ?Sized,
     {
-        ffn::init()?;
         let format_ctx = ffn::format::input(path)?;
 
         let duration =
