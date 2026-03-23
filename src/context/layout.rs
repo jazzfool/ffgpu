@@ -4,6 +4,7 @@ use ffmpeg_next::sys as ff;
 pub enum PlaneLayout<T> {
     PackedYUV420([T; 2]),
     YUV420([T; 3]),
+    YUV444([T; 3]),
     RGB(T),
 }
 
@@ -12,6 +13,7 @@ impl<T> PlaneLayout<T> {
         match self {
             PlaneLayout::PackedYUV420(_) => PlaneLayout::PackedYUV420([(); 2]),
             PlaneLayout::YUV420(_) => PlaneLayout::YUV420([(); 3]),
+            PlaneLayout::YUV444(_) => PlaneLayout::YUV444([(); 3]),
             PlaneLayout::RGB(_) => PlaneLayout::RGB(()),
         }
     }
@@ -66,6 +68,10 @@ pub fn av_pixel_texture_format(
             ]),
             depth: Depth::D16, // don't apply scaling in shader
         }),
+        ff::AVPixelFormat::AV_PIX_FMT_YUV444P => Some(FrameDescriptor {
+            planes: PlaneLayout::YUV444([wgpu::TextureFormat::R8Unorm; 3]),
+            depth: Depth::D8,
+        }),
         _ => None,
     }
 }
@@ -111,6 +117,14 @@ pub fn create_frame_textures(
         (PlaneLayout::YUV420([y, u, v]), _) => Some(FrameDescriptor {
             planes: PlaneLayout::YUV420([
                 create_texture(device, width, height, y, usage),
+                create_texture(device, width / 2, height / 2, u, usage),
+                create_texture(device, width / 2, height / 2, v, usage),
+            ]),
+            depth: desc.depth,
+        }),
+        (PlaneLayout::YUV444([y, u, v]), _) => Some(FrameDescriptor {
+            planes: PlaneLayout::YUV444([
+                create_texture(device, width, height, y, usage),
                 create_texture(device, width, height, u, usage),
                 create_texture(device, width, height, v, usage),
             ]),
@@ -128,7 +142,7 @@ pub fn create_frame_texture_views(
         PlaneLayout::PackedYUV420([y, uv]) => {
             PlaneLayout::PackedYUV420([y.create_view(desc), uv.create_view(desc)])
         }
-        PlaneLayout::YUV420([y, u, v]) => PlaneLayout::YUV420([
+        PlaneLayout::YUV420([y, u, v]) | PlaneLayout::YUV444([y, u, v]) => PlaneLayout::YUV420([
             y.create_view(desc),
             u.create_view(desc),
             v.create_view(desc),

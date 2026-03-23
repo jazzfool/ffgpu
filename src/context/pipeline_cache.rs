@@ -83,7 +83,7 @@ impl PipelineCache {
 
                 let layout_entries: &[_] = match identity.planes {
                     layout::PlaneLayout::PackedYUV420(_) => &[float_view(0), float_view(1)],
-                    layout::PlaneLayout::YUV420(_) => {
+                    layout::PlaneLayout::YUV420(_) | layout::PlaneLayout::YUV444(_) => {
                         &[float_view(0), float_view(1), float_view(2)]
                     }
                     layout::PlaneLayout::RGB(_) => &[float_view(0)],
@@ -109,6 +109,7 @@ impl PipelineCache {
                 let shader_source = match identity.planes {
                     layout::PlaneLayout::PackedYUV420(_) => include_str!("yuv420_packed.wgsl"),
                     layout::PlaneLayout::YUV420(_) => include_str!("yuv420.wgsl"),
+                    layout::PlaneLayout::YUV444(_) => include_str!("yuv444.wgsl"),
                     layout::PlaneLayout::RGB(_) => todo!(),
                 };
                 let shader_source = shader_source
@@ -204,7 +205,7 @@ impl PipelineCache {
                     ],
                 })
             }
-            layout::PlaneLayout::YUV420([y, u, v]) => {
+            layout::PlaneLayout::YUV420([y, u, v]) | layout::PlaneLayout::YUV444([y, u, v]) => {
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &bg0_layout,

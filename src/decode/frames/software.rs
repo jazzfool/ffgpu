@@ -130,148 +130,50 @@ impl FrameAdapter for SoftwareFrameAdapter {
             mapped_frame
         };
 
+        let write_texture = |texture: &wgpu::Texture, plane: usize, div: i32| {
+            let stride = mapped_frame.linesize[plane];
+            let data = unsafe {
+                core::slice::from_raw_parts(
+                    mapped_frame.data[plane],
+                    (stride * frame.height / div) as _,
+                )
+            };
+
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride as _),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: (frame.width / div) as _,
+                    height: (frame.height / div) as _,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+
         match &texture.textures.planes {
             layout::PlaneLayout::PackedYUV420([y, uv]) => {
-                let y_stride = mapped_frame.linesize[0];
-                let y_data = unsafe {
-                    core::slice::from_raw_parts(
-                        mapped_frame.data[0],
-                        (y_stride * frame.height) as _,
-                    )
-                };
-
-                let uv_stride = mapped_frame.linesize[1];
-                let uv_data = unsafe {
-                    core::slice::from_raw_parts(
-                        mapped_frame.data[1],
-                        (uv_stride * frame.height / 2) as _,
-                    )
-                };
-
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: y,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    y_data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(y_stride as _),
-                        rows_per_image: None,
-                    },
-                    wgpu::Extent3d {
-                        width: frame.width as _,
-                        height: frame.height as _,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: uv,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    uv_data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(uv_stride as _),
-                        rows_per_image: None,
-                    },
-                    wgpu::Extent3d {
-                        width: frame.width as u32 / 2,
-                        height: frame.height as u32 / 2,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                write_texture(y, 0, 1);
+                write_texture(uv, 1, 2);
             }
             layout::PlaneLayout::YUV420([y, u, v]) => {
-                let y_stride = mapped_frame.linesize[0];
-                let y_data = unsafe {
-                    core::slice::from_raw_parts(
-                        mapped_frame.data[0],
-                        (y_stride * frame.height) as _,
-                    )
-                };
-
-                let u_stride = mapped_frame.linesize[1];
-                let u_data = unsafe {
-                    core::slice::from_raw_parts(
-                        mapped_frame.data[1],
-                        (u_stride * frame.height / 2) as _,
-                    )
-                };
-
-                let v_stride = mapped_frame.linesize[2];
-                let v_data = unsafe {
-                    core::slice::from_raw_parts(
-                        mapped_frame.data[2],
-                        (v_stride * frame.height / 2) as _,
-                    )
-                };
-
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: y,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    y_data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(y_stride as _),
-                        rows_per_image: None,
-                    },
-                    wgpu::Extent3d {
-                        width: frame.width as _,
-                        height: frame.height as _,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: u,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    u_data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(u_stride as _),
-                        rows_per_image: None,
-                    },
-                    wgpu::Extent3d {
-                        width: frame.width as u32 / 2,
-                        height: frame.height as u32 / 2,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: v,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    v_data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(v_stride as _),
-                        rows_per_image: None,
-                    },
-                    wgpu::Extent3d {
-                        width: frame.width as u32 / 2,
-                        height: frame.height as u32 / 2,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                write_texture(y, 0, 1);
+                write_texture(u, 1, 2);
+                write_texture(v, 2, 2);
+            }
+            layout::PlaneLayout::YUV444([y, u, v]) => {
+                write_texture(y, 0, 1);
+                write_texture(u, 1, 1);
+                write_texture(v, 2, 1);
             }
             layout::PlaneLayout::RGB(_) => todo!(),
         }
