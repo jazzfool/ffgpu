@@ -3,7 +3,7 @@ use crate::{
     decode::{
         Clock, DecoderState, Frame, FrameQueue, PlayState,
         audio::{self, AudioSink, AudioThread},
-        packet_queue,
+        frames, packet_queue,
         read::{Input, ReadMessage, ReadThread},
         sink_thread, video,
     },
@@ -63,7 +63,7 @@ pub struct Video {
     queue: wgpu::Queue,
 
     state: Arc<DecoderState>,
-    frame_decoder: video::FrameDecoder,
+    frame_decoder: frames::FrameDecoder,
     video_decoder: NonNull<ff::AVCodecContext>,
     read_thread: Option<JoinHandle<()>>,
     video_thread: Option<JoinHandle<()>>,
@@ -98,7 +98,7 @@ impl Video {
         let video_decoder = video::Decoder::new(&mut input.format_ctx, preferred_device_type())?;
         let audio_decoder = audio::Decoder::new(&mut input)?;
         let frame_decoder =
-            video::FrameDecoder::new(&device, pipeline_cache.clone(), &video_decoder.metadata)?;
+            frames::FrameDecoder::new(&device, pipeline_cache.clone(), &video_decoder.metadata)?;
 
         let (video_tx, video_rx, video_queue) = packet_queue();
         let (audio_tx, audio_rx, audio_queue) = packet_queue();

@@ -1,7 +1,7 @@
 use super::FrameAdapter;
 use crate::{
     context::{layout, pipeline_cache::PipelineCache},
-    decode::hw::FrameAdapterBuilder,
+    decode::frames::FrameAdapterBuilder,
     error::{Error, Result},
 };
 use ffmpeg_next::{self as ffn, sys as ff};

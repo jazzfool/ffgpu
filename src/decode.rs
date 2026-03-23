@@ -1,5 +1,5 @@
 pub(crate) mod audio;
-pub(crate) mod hw;
+pub(crate) mod frames;
 pub(crate) mod read;
 pub(crate) mod video;
 

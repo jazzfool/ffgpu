@@ -1,7 +1,6 @@
+use crate::context::layout;
 use ffmpeg_next::{self as ffn, sys as ff};
 use std::{borrow::Cow, collections::BTreeMap};
-
-use crate::context::layout;
 
 fn yuv_to_rgb_matrix(color_space: ffn::color::Space) -> [f32; 9] {
     assert!(
