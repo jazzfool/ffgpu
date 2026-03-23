@@ -20,7 +20,6 @@ This library is very incomplete and the following features are missing/WIP (roug
 - Network streams
 - Stream query and selection
 - Subtitle decoding (including from a separate file)
-- Software decoding fallback
 - Fast thumbnailing; directly downsampled to an RGB texture atlas array from the YUV texture.
 
 Full zero-copy (including GPU copies) is currently unachievable due to upstream limitations. To name a couple:

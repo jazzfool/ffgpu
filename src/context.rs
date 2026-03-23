@@ -1,15 +1,19 @@
+pub(crate) mod layout;
 pub(crate) mod pipeline_cache;
 
 use crate::{decode::audio::AudioSink, error::Result, video::Video};
 use pipeline_cache::PipelineCache;
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 pub struct Context {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline_cache: PipelineCache,
+    pipeline_cache: Arc<Mutex<PipelineCache>>,
 }
 
 impl Context {
@@ -24,7 +28,7 @@ impl Context {
         let device = device.clone();
         let queue = queue.clone();
 
-        let pipeline_cache = PipelineCache::new(device.clone());
+        let pipeline_cache = Arc::new(Mutex::new(PipelineCache::new(device.clone())));
 
         Context {
             instance,
@@ -44,7 +48,7 @@ impl Context {
             self.adapter.clone(),
             self.device.clone(),
             self.queue.clone(),
-            &mut self.pipeline_cache,
+            self.pipeline_cache.clone(),
             path,
         )
     }

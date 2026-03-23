@@ -12,8 +12,14 @@ use std::{
     time::Duration,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Metadata {
+    pub duration: Duration,
+}
+
 pub(crate) struct Input {
     pub format_ctx: ffn::format::context::Input,
+    pub metadata: Metadata,
 }
 
 impl Input {
@@ -23,7 +29,17 @@ impl Input {
     {
         ffn::init()?;
         let format_ctx = ffn::format::input(path)?;
-        Ok(Input { format_ctx })
+
+        let duration =
+            format_ctx.duration() as f64 / f64::from(ffn::Rational::from(ff::AV_TIME_BASE_Q));
+        let metadata = Metadata {
+            duration: Duration::from_secs_f64(duration),
+        };
+
+        Ok(Input {
+            format_ctx,
+            metadata,
+        })
     }
 }
 

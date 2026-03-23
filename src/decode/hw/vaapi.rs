@@ -1,5 +1,10 @@
-use super::HardwareDecoder;
-use crate::{context::pipeline_cache::PipelineCache, error::Result};
+use super::FrameAdapter;
+use crate::{
+    Error,
+    context::{layout, pipeline_cache::PipelineCache},
+    decode::hw::FrameAdapterBuilder,
+    error::Result,
+};
 use ash::vk;
 use ffmpeg_next::sys as ff;
 use std::ptr::NonNull;
@@ -9,12 +14,13 @@ struct VulkanDRMTexture {
     y_texture: wgpu::Texture,
     uv_texture: wgpu::Texture,
     bg0: wgpu::BindGroup,
+    identity: layout::FrameDescriptor<()>,
 }
 
 impl VulkanDRMTexture {
     unsafe fn new(
         device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
+        pipeline_cache: &mut PipelineCache,
         frame: NonNull<ff::AVFrame>,
     ) -> Self {
         unsafe {
@@ -52,14 +58,28 @@ impl VulkanDRMTexture {
                 view_formats: &[],
             });
 
-            let bg0 =
-                PipelineCache::create_planar_bind_group(device, &y_texture, &uv_texture, layout);
+            let textures = layout::FrameDescriptor {
+                planes: layout::PlaneLayout::PackedYUV420([y_texture.clone(), uv_texture.clone()]),
+                depth: layout::Depth::D8,
+            };
+
+            let bg0 = pipeline_cache.bind_frame_textures(
+                &layout::FrameDescriptor {
+                    planes: layout::create_frame_texture_views(
+                        &textures.planes,
+                        &Default::default(),
+                    ),
+                    depth: layout::Depth::D8,
+                },
+                frame.colorspace.into(),
+            );
 
             VulkanDRMTexture {
                 drm_frame,
                 y_texture,
                 uv_texture,
                 bg0,
+                identity: textures.as_identity(),
             }
         }
     }
@@ -286,218 +306,62 @@ impl Drop for VulkanDRMTexture {
     }
 }
 
-struct CopiedTexture {
-    nv12_frame: NonNull<ff::AVFrame>,
-    y_texture: wgpu::Texture,
-    uv_texture: wgpu::Texture,
-    bg0: wgpu::BindGroup,
+pub struct VAAPIFrameAdapter {
+    imported: Option<VulkanDRMTexture>,
 }
 
-impl CopiedTexture {
-    fn new(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        frame: NonNull<ff::AVFrame>,
-    ) -> Self {
-        let frame = unsafe { frame.as_ref() };
-
-        let nv12_frame = unsafe { NonNull::new(ff::av_frame_alloc()).expect("av_frame_alloc") };
-
-        let y_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: frame.width as _,
-                height: frame.height as _,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let uv_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: frame.width as u32 / 2,
-                height: frame.height as u32 / 2,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let bg0 = PipelineCache::create_planar_bind_group(device, &y_texture, &uv_texture, layout);
-
-        CopiedTexture {
-            nv12_frame,
-            y_texture,
-            uv_texture,
-            bg0,
-        }
+impl FrameAdapterBuilder for VAAPIFrameAdapter {
+    unsafe fn new(_decoder: NonNull<ff::AVCodecContext>) -> Result<Self> {
+        Ok(VAAPIFrameAdapter { imported: None })
     }
 
-    unsafe fn import_frame(&mut self, queue: &wgpu::Queue, frame: NonNull<ff::AVFrame>) {
-        unsafe {
-            let frame_ref = frame.as_ref();
-            let nv12_frame_ref = self.nv12_frame.as_mut();
-
-            nv12_frame_ref.format = ff::AVPixelFormat::AV_PIX_FMT_NV12 as _;
-            ff::av_hwframe_map(self.nv12_frame.as_ptr(), frame.as_ptr(), 0);
-
-            let y_stride = nv12_frame_ref.linesize[0];
-            let y_data = core::slice::from_raw_parts(
-                nv12_frame_ref.data[0],
-                (y_stride * frame_ref.height) as _,
-            );
-
-            let uv_stride = nv12_frame_ref.linesize[1];
-            let uv_data = core::slice::from_raw_parts(
-                nv12_frame_ref.data[1],
-                (uv_stride * frame_ref.height / 2) as _,
-            );
-
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.y_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                y_data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(y_stride as _),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: frame_ref.width as _,
-                    height: frame_ref.height as _,
-                    depth_or_array_layers: 1,
-                },
-            );
-
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.uv_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                uv_data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(uv_stride as _),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: frame_ref.width as u32 / 2,
-                    height: frame_ref.height as u32 / 2,
-                    depth_or_array_layers: 1,
-                },
-            );
-
-            ff::av_frame_unref(self.nv12_frame.as_ptr());
-        }
+    fn supports_format(format: ff::AVPixelFormat) -> bool {
+        format == ff::AVPixelFormat::AV_PIX_FMT_VAAPI
     }
 }
 
-impl Drop for CopiedTexture {
-    fn drop(&mut self) {
-        unsafe {
-            ff::av_frame_free(&mut self.nv12_frame.as_ptr());
-        }
-    }
-}
-
-enum ImportedTexture {
-    VulkanDRM(VulkanDRMTexture),
-    PlanarCopy(CopiedTexture),
-}
-
-pub struct VAAPIHardwareDecoder {
-    imported: Option<ImportedTexture>,
-}
-
-impl HardwareDecoder for VAAPIHardwareDecoder {
-    const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI;
-
-    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Result<Self> {
-        Ok(VAAPIHardwareDecoder { imported: None })
-    }
-
+impl FrameAdapter for VAAPIFrameAdapter {
     unsafe fn import_frame(
         &mut self,
         frame: NonNull<ff::AVFrame>,
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        layout: &wgpu::BindGroupLayout,
+        pipeline_cache: &mut PipelineCache,
     ) -> Result<()> {
         unsafe {
             let frame_ref = frame.as_ref();
 
-            assert_eq!(
-                frame_ref.format,
-                ff::AVPixelFormat::AV_PIX_FMT_VAAPI as i32,
-                "unexpected frame AVPixelFormat, expected VA-API frame"
-            );
+            if frame_ref.format != ff::AVPixelFormat::AV_PIX_FMT_VAAPI as i32 {
+                return Err(Error::UnsupportedPixelFormat);
+            }
 
-            let imported = self
-                .imported
-                .get_or_insert_with(|| match adapter.get_info().backend {
-                    wgpu::Backend::Vulkan => {
-                        ImportedTexture::VulkanDRM(VulkanDRMTexture::new(device, layout, frame))
-                    }
-                    _ => {
-                        log::warn!("unsupported zero-copy WGPU backend (must be Vulkan)");
-                        log::warn!("using CPU frame copies");
-                        ImportedTexture::PlanarCopy(CopiedTexture::new(device, layout, frame))
-                    }
-                });
-
-            let force_planar_copy = match imported {
-                ImportedTexture::VulkanDRM(imported) => {
-                    !imported.import_frame(instance, device, encoder, frame)
-                }
-                ImportedTexture::PlanarCopy(imported) => {
-                    imported.import_frame(queue, frame);
-                    false
-                }
+            let imported = if let Some(imported) = self.imported.as_mut() {
+                imported
+            } else {
+                self.imported.insert(match adapter.get_info().backend {
+                    wgpu::Backend::Vulkan => VulkanDRMTexture::new(device, pipeline_cache, frame),
+                    _ => return Err(Error::UnsupportedBackend),
+                })
             };
 
-            if force_planar_copy {
-                log::error!("vulkan DRM import failed");
-                log::warn!("using CPU frame copies");
-                let mut imported = CopiedTexture::new(device, layout, frame);
-                imported.import_frame(queue, frame);
-                self.imported = Some(ImportedTexture::PlanarCopy(imported));
-            }
+            imported.import_frame(instance, device, encoder, frame);
 
             Ok(())
         }
     }
 
     fn bind_group(&self) -> Option<&wgpu::BindGroup> {
-        self.imported.as_ref().map(|imported| match imported {
-            ImportedTexture::VulkanDRM(imported) => &imported.bg0,
-            ImportedTexture::PlanarCopy(imported) => &imported.bg0,
-        })
+        self.imported.as_ref().map(|imported| &imported.bg0)
+    }
+
+    fn layout_identity(&self) -> Option<layout::FrameDescriptor<()>> {
+        self.imported.as_ref().map(|imported| imported.identity)
     }
 
     fn name(&self) -> &'static str {
-        match &self.imported {
-            Some(ImportedTexture::VulkanDRM(_)) => "VA-API Vulkan DMA",
-            Some(ImportedTexture::PlanarCopy(_)) => "VA-API software copy",
-            None => "VA-API",
-        }
+        "VA-API Vulkan DMA"
     }
 }

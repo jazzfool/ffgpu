@@ -2,16 +2,17 @@ use crate::{
     context::pipeline_cache::PipelineCache,
     decode::{
         Clock, DecoderState, Frame, FrameQueue, PlayState,
-        audio::{self, AudioDecoder, AudioSink, AudioThread},
-        hw::HardwareDecoder,
+        audio::{self, AudioSink, AudioThread},
         packet_queue,
         read::{Input, ReadMessage, ReadThread},
-        video,
+        sink_thread, video,
     },
     error::Result,
 };
 use crossbeam_channel::{Sender, unbounded};
 use ffmpeg_next::{self as ffn, sys as ff};
+use std::ptr::NonNull;
+use std::sync::Mutex;
 use std::{
     ops::Add,
     path::Path,
@@ -32,11 +33,27 @@ enum FrameResponse {
     Requeue,
 }
 
+#[cfg(target_os = "windows")]
+fn preferred_device_type() -> ff::AVHWDeviceType {
+    ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA
+}
+
+#[cfg(target_os = "macos")]
+fn preferred_device_type() -> ff::AVHWDeviceType {
+    ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX
+}
+
+#[cfg(target_os = "linux")]
+fn preferred_device_type() -> ff::AVHWDeviceType {
+    ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI
+}
+
 pub struct Statistics {
     pub video_clock: f64,
     pub audio_clock: f64,
     pub sync_latency: f64,
     pub decoder_name: &'static str,
+    // TODO: add dropped frames and whatnot
 }
 
 pub struct Video {
@@ -47,6 +64,7 @@ pub struct Video {
 
     state: Arc<DecoderState>,
     frame_decoder: video::FrameDecoder,
+    video_decoder: NonNull<ff::AVCodecContext>,
     read_thread: Option<JoinHandle<()>>,
     video_thread: Option<JoinHandle<()>>,
     audio_thread: Option<JoinHandle<()>>,
@@ -69,7 +87,7 @@ impl Video {
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
-        pipeline_cache: &mut PipelineCache,
+        pipeline_cache: Arc<Mutex<PipelineCache>>,
         path: &P,
     ) -> Result<(Self, AudioSink)>
     where
@@ -77,14 +95,14 @@ impl Video {
     {
         let mut input = Input::open(path)?;
 
-        let (video_decoder, frame_decoder) =
-            video::Decoder::new(&mut input, &device, pipeline_cache)?;
-
-        let audio_decoder = AudioDecoder::new(&mut input)?;
+        let video_decoder = video::Decoder::new(&mut input.format_ctx, preferred_device_type())?;
+        let audio_decoder = audio::Decoder::new(&mut input)?;
+        let frame_decoder =
+            video::FrameDecoder::new(&device, pipeline_cache.clone(), &video_decoder.metadata)?;
 
         let (video_tx, video_rx, video_queue) = packet_queue();
         let (audio_tx, audio_rx, audio_queue) = packet_queue();
-        let video_frame_queue = FrameQueue::new(18);
+        let video_frame_queue = FrameQueue::new(8);
         let audio_frame_queue = FrameQueue::new(16);
 
         let video_clock = Arc::new(Clock::new(video_queue.clone()));
@@ -102,16 +120,25 @@ impl Video {
         };
 
         let audio_stream = audio::AudioStream {
-            metadata: audio_decoder.metadata,
+            metadata: audio_decoder
+                .as_ref()
+                .map(|decoder| decoder.metadata)
+                .unwrap_or_default(),
             messages: audio_msg_tx.clone(),
             packets: audio_tx,
             frames: audio_frame_queue.clone(),
         };
 
-        let state = Arc::new(DecoderState::new(video_stream, audio_stream));
+        let state = Arc::new(DecoderState::new(
+            input.metadata,
+            video_stream,
+            audio_stream,
+        ));
 
         let read_thread = ReadThread::new(input, state.clone(), read_msg_rx).run();
 
+        let video_decoder_ptr =
+            NonNull::new(unsafe { video_decoder.decoder.as_ptr() as _ }).unwrap();
         let video_thread = video::VideoThread::new(
             video_decoder,
             state.clone(),
@@ -123,14 +150,21 @@ impl Video {
         )
         .run();
 
-        let audio_thread = AudioThread::new(
-            audio_decoder,
-            state.clone(),
-            audio_rx,
-            audio_frame_queue.clone(),
-            audio_msg_rx,
-        )
-        .run();
+        let audio_thread = audio_decoder
+            .map(|audio_decoder| {
+                AudioThread::new(
+                    audio_decoder,
+                    state.clone(),
+                    audio_rx.clone(),
+                    audio_frame_queue.clone(),
+                    audio_msg_rx,
+                )
+                .run()
+            })
+            .unwrap_or_else(|| {
+                let state = state.clone();
+                std::thread::spawn(move || sink_thread(state, audio_rx))
+            });
 
         let audio_sink = AudioSink::new(
             state.clone(),
@@ -149,6 +183,7 @@ impl Video {
 
                 state,
                 frame_decoder,
+                video_decoder: video_decoder_ptr,
                 read_thread: Some(read_thread),
                 video_thread: Some(video_thread),
                 audio_thread: Some(audio_thread),
@@ -255,12 +290,13 @@ impl Video {
         }
 
         unsafe {
-            self.frame_decoder.decode_native_frame(
+            self.frame_decoder.decode_frame(
                 &self.instance,
                 &self.adapter,
                 &self.device,
                 &self.queue,
                 encoder,
+                self.video_decoder,
                 &frame.frame,
             )?
         };
@@ -297,7 +333,9 @@ impl Video {
             // (well, of course it is possible, but wgpu doesn't enable the necessary device extensions...)
             // to counteract this, when stepping a frame (e.g., during accurate seek while paused), we perform the YUV->RGB copy a few more times after the seek.
             self.step_needs_copy -= 1;
-            self.frame_decoder.copy_to_rgb(encoder);
+            // TODO: actually get the color space
+            self.frame_decoder
+                .copy_to_rgb(encoder, ffn::color::Space::BT709);
         }
 
         let video_frame_queue = self.state.video_stream.load().frames.clone();
@@ -359,7 +397,7 @@ impl Video {
         let video_clock = self.video_clock.get().unwrap_or(0.);
         let audio_clock = self.audio_clock.get().unwrap_or(0.);
         let sync_latency = video_clock - audio_clock;
-        let decoder_name = self.frame_decoder.hwdec.name();
+        let decoder_name = self.decoder_name();
 
         Statistics {
             video_clock,
@@ -381,7 +419,7 @@ impl Video {
 
     #[inline]
     pub fn duration(&self) -> Duration {
-        self.video_info().duration
+        self.state.metadata.duration
     }
 
     #[inline]
@@ -392,7 +430,11 @@ impl Video {
 
     #[inline]
     pub fn decoder_name(&self) -> &'static str {
-        self.frame_decoder.hwdec.name()
+        self.frame_decoder
+            .adapter
+            .as_ref()
+            .map(|adapter| adapter.name())
+            .unwrap_or("Unknown")
     }
 
     pub fn position(&self) -> Duration {

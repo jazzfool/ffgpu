@@ -1,18 +1,26 @@
-#[cfg(target_os = "windows")]
-mod d3d11va;
-#[cfg(target_os = "linux")]
-mod vaapi;
-#[cfg(target_os = "macos")]
-mod video_toolbox;
+pub mod software;
 
-use crate::error::Result;
+#[cfg(target_os = "windows")]
+pub mod d3d11va;
+#[cfg(target_os = "linux")]
+pub mod vaapi;
+#[cfg(target_os = "macos")]
+pub mod video_toolbox;
+
+use crate::{
+    context::{layout, pipeline_cache::PipelineCache},
+    error::Result,
+};
 use ffmpeg_next::sys as ff;
 use std::ptr::NonNull;
 
-pub(crate) trait HardwareDecoder: Sized {
-    const DEVICE_TYPE: ff::AVHWDeviceType;
+// needs to be separate from FrameAdapater to be dyn compatible
+pub(crate) trait FrameAdapterBuilder: FrameAdapter + Sized {
+    unsafe fn new(decoder: NonNull<ff::AVCodecContext>) -> Result<Self>;
+    fn supports_format(format: ff::AVPixelFormat) -> bool;
+}
 
-    unsafe fn new(hwctx: NonNull<ff::AVBufferRef>) -> Result<Self>;
+pub(crate) trait FrameAdapter {
     unsafe fn import_frame(
         &mut self,
         frame: NonNull<ff::AVFrame>,
@@ -21,17 +29,9 @@ pub(crate) trait HardwareDecoder: Sized {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        layout: &wgpu::BindGroupLayout,
+        pipeline_cache: &mut PipelineCache,
     ) -> Result<()>;
+    fn layout_identity(&self) -> Option<layout::FrameDescriptor<()>>;
     fn bind_group(&self) -> Option<&wgpu::BindGroup>;
     fn name(&self) -> &'static str;
 }
-
-#[cfg(target_os = "windows")]
-pub(crate) type NativeDecoder = d3d11va::D3D11VAHardwareDecoder;
-
-#[cfg(target_os = "linux")]
-pub(crate) type NativeDecoder = vaapi::VAAPIHardwareDecoder;
-
-#[cfg(target_os = "macos")]
-pub(crate) type NativeDecoder = video_toolbox::VideoToolboxHardwareDecoder;

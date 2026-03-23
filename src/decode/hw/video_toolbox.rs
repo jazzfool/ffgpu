@@ -1,6 +1,6 @@
 use crate::{
-    context::pipeline_cache::PipelineCache,
-    decode::hw::HardwareDecoder,
+    context::{layout, pipeline_cache::PipelineCache},
+    decode::hw::{FrameAdapter, FrameAdapterBuilder},
     error::{Error, Result},
 };
 use ffmpeg_next::sys as ff;
@@ -13,14 +13,16 @@ struct ImportedCVMetalTexture {
     y_texture: wgpu::Texture,
     uv_texture: wgpu::Texture,
     bg0: wgpu::BindGroup,
+    identity: layout::FrameDescriptor<()>,
 }
 
 impl ImportedCVMetalTexture {
     unsafe fn new(
         device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
+        pipeline_cache: &mut PipelineCache,
         metal_device: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>,
         pixel_buffer: NonNull<cv::CVPixelBuffer>,
+        frame: &ff::AVFrame,
     ) -> Self {
         let texture_cache = null_mut();
         unsafe {
@@ -70,13 +72,25 @@ impl ImportedCVMetalTexture {
             view_formats: &[],
         });
 
-        let bg0 = PipelineCache::create_planar_bind_group(device, &y_texture, &uv_texture, layout);
+        let textures = layout::FrameDescriptor {
+            planes: layout::PlaneLayout::PackedYUV420([y_texture.clone(), uv_texture.clone()]),
+            depth: layout::Depth::D8,
+        };
+
+        let bg0 = pipeline_cache.bind_frame_textures(
+            &layout::FrameDescriptor {
+                planes: layout::create_frame_texture_views(&textures.planes, &Default::default()),
+                depth: layout::Depth::D8,
+            },
+            frame.colorspace.into(),
+        );
 
         ImportedCVMetalTexture {
             texture_cache,
             y_texture,
             uv_texture,
             bg0,
+            identity: textures.as_identity(),
         }
     }
 
@@ -198,154 +212,23 @@ impl ImportedCVMetalTexture {
     }
 }
 
-struct CopiedTexture {
-    y_texture: wgpu::Texture,
-    uv_texture: wgpu::Texture,
-    bg0: wgpu::BindGroup,
+pub struct VideoToolboxFrameAdapter {
+    imported_texture: Option<ImportedCVMetalTexture>,
 }
 
-impl CopiedTexture {
-    fn new(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        pixel_buffer: NonNull<cv::CVPixelBuffer>,
-    ) -> Self {
-        let pixel_buffer = unsafe { pixel_buffer.as_ref() };
-        let y_width = cv::CVPixelBufferGetWidthOfPlane(pixel_buffer, 0);
-        let y_height = cv::CVPixelBufferGetHeightOfPlane(pixel_buffer, 0);
-        let uv_width = cv::CVPixelBufferGetWidthOfPlane(pixel_buffer, 1);
-        let uv_height = cv::CVPixelBufferGetHeightOfPlane(pixel_buffer, 1);
-
-        let y_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: y_width as _,
-                height: y_height as _,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let uv_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: uv_width as _,
-                height: uv_height as _,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let bg0 = PipelineCache::create_planar_bind_group(device, &y_texture, &uv_texture, layout);
-
-        CopiedTexture {
-            y_texture,
-            uv_texture,
-            bg0,
-        }
-    }
-
-    unsafe fn import_cv_buffer(
-        &self,
-        queue: &wgpu::Queue,
-        pixel_buffer: NonNull<cv::CVPixelBuffer>,
-    ) {
-        let pixel_buffer = unsafe { pixel_buffer.as_ref() };
-        unsafe {
-            cv::CVPixelBufferLockBaseAddress(pixel_buffer, cv::CVPixelBufferLockFlags::ReadOnly)
-        };
-        let y_data = cv::CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0);
-        let uv_data = cv::CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1);
-        let y_bytes_per_row = cv::CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
-        let uv_bytes_per_row = cv::CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
-
-        let y_data = unsafe {
-            core::slice::from_raw_parts(
-                y_data as *const u8,
-                y_bytes_per_row * self.y_texture.height() as usize,
-            )
-        };
-        let uv_data = unsafe {
-            core::slice::from_raw_parts(
-                uv_data as *const u8,
-                uv_bytes_per_row * self.uv_texture.height() as usize,
-            )
-        };
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.y_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            y_data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(y_bytes_per_row as _),
-                rows_per_image: Some(self.y_texture.height()),
-            },
-            wgpu::Extent3d {
-                width: self.y_texture.width(),
-                height: self.y_texture.height(),
-                depth_or_array_layers: 1,
-            },
-        );
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.uv_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            uv_data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(uv_bytes_per_row as _),
-                rows_per_image: Some(self.uv_texture.height()),
-            },
-            wgpu::Extent3d {
-                width: self.uv_texture.width(),
-                height: self.uv_texture.height(),
-                depth_or_array_layers: 1,
-            },
-        );
-
-        unsafe {
-            cv::CVPixelBufferUnlockBaseAddress(pixel_buffer, cv::CVPixelBufferLockFlags::ReadOnly)
-        };
-    }
-}
-
-enum ImportedTexture {
-    CVMetalTexture(ImportedCVMetalTexture),
-    PlanarCopy(CopiedTexture),
-}
-
-pub struct VideoToolboxHardwareDecoder {
-    imported_texture: Option<ImportedTexture>,
-}
-
-impl HardwareDecoder for VideoToolboxHardwareDecoder {
-    const DEVICE_TYPE: ff::AVHWDeviceType = ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
-
-    unsafe fn new(_hwctx: NonNull<ff::AVBufferRef>) -> Result<Self> {
-        Ok(VideoToolboxHardwareDecoder {
+impl FrameAdapterBuilder for VideoToolboxFrameAdapter {
+    unsafe fn new(_decoder: NonNull<ff::AVCodecContext>) -> Result<Self> {
+        Ok(VideoToolboxFrameAdapter {
             imported_texture: None,
         })
     }
 
+    fn supports_format(format: ff::AVPixelFormat) -> bool {
+        format == ff::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX
+    }
+}
+
+impl FrameAdapter for VideoToolboxFrameAdapter {
     unsafe fn import_frame(
         &mut self,
         mut frame: NonNull<ff::AVFrame>,
@@ -354,7 +237,7 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _encoder: &mut wgpu::CommandEncoder,
-        layout: &wgpu::BindGroupLayout,
+        pipeline_cache: &mut PipelineCache,
     ) -> Result<()> {
         unsafe {
             let frame = frame.as_mut();
@@ -362,17 +245,17 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                 return Err(Error::InvalidFrame);
             }
 
-            assert_eq!(
-                frame.format,
-                ff::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX as i32,
-                "unexpected frame AVPixelFormat, expected VideoToolbox frame"
-            );
+            if frame.format != ff::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX as i32 {
+                return Err(Error::UnsupportedPixelFormat);
+            }
 
             let pixel_buffer = NonNull::new_unchecked(frame.data[3] as *mut cv::CVPixelBuffer);
 
-            let imported_texture =
+            let imported_texture = if let Some(imported_texture) = self.imported_texture.as_ref() {
+                imported_texture
+            } else {
                 self.imported_texture
-                    .get_or_insert_with(|| match adapter.get_info().backend {
+                    .insert(match adapter.get_info().backend {
                         wgpu::Backend::Metal => {
                             let hal_device = device.as_hal::<wgpu::hal::metal::Api>().unwrap();
                             let metal_device =
@@ -382,53 +265,33 @@ impl HardwareDecoder for VideoToolboxHardwareDecoder {
                                 )
                                 .as_ref()
                                 .unwrap(/* invariant */);
-                            ImportedTexture::CVMetalTexture(ImportedCVMetalTexture::new(
+                            ImportedCVMetalTexture::new(
                                 device,
-                                layout,
+                                pipeline_cache,
                                 metal_device,
                                 pixel_buffer,
-                            ))
+                                frame,
+                            )
                         }
-                        backend => {
-                            log::warn!(
-                                "unsupported zero-copy WGPU backend {} (must be Metal)",
-                                backend
-                            );
-                            log::warn!("using CPU frame copies");
-                            ImportedTexture::PlanarCopy(CopiedTexture::new(
-                                device,
-                                layout,
-                                pixel_buffer,
-                            ))
-                        }
-                    });
+                        _ => return Err(Error::UnsupportedBackend),
+                    })
+            };
 
-            match imported_texture {
-                ImportedTexture::CVMetalTexture(imported_texture) => {
-                    imported_texture.import_cv_buffer(device, queue, pixel_buffer);
-                }
-                ImportedTexture::PlanarCopy(imported_texture) => {
-                    imported_texture.import_cv_buffer(queue, pixel_buffer);
-                }
-            }
+            imported_texture.import_cv_buffer(device, queue, pixel_buffer);
 
             Ok(())
         }
     }
 
     fn bind_group(&self) -> Option<&wgpu::BindGroup> {
-        let bg0 = match self.imported_texture.as_ref()? {
-            ImportedTexture::CVMetalTexture(imported_texture) => &imported_texture.bg0,
-            ImportedTexture::PlanarCopy(imported_texture) => &imported_texture.bg0,
-        };
-        Some(bg0)
+        Some(&self.imported_texture.as_ref()?.bg0)
+    }
+
+    fn layout_identity(&self) -> Option<layout::FrameDescriptor<()>> {
+        Some(self.imported_texture.as_ref()?.identity)
     }
 
     fn name(&self) -> &'static str {
-        match &self.imported_texture {
-            Some(ImportedTexture::CVMetalTexture(_)) => "VideoToolbox CVMetalTexture",
-            Some(ImportedTexture::PlanarCopy(_)) => "VideoToolbox software copy",
-            None => "VideoToolbox",
-        }
+        "VideoToolbox CVMetalTexture"
     }
 }

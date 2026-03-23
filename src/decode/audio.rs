@@ -61,18 +61,16 @@ pub(crate) struct AudioStream {
     pub frames: FrameQueue,
 }
 
-pub(crate) struct AudioDecoder {
+pub(crate) struct Decoder {
     pub decoder: ffn::decoder::Audio,
     pub metadata: AudioMetadata,
 }
 
-impl AudioDecoder {
-    pub fn new(input: &mut Input) -> Result<Self> {
-        let stream = input
-            .format_ctx
-            .streams()
-            .best(ffn::media::Type::Audio)
-            .ok_or(Error::InvalidStream)?;
+impl Decoder {
+    pub fn new(input: &mut Input) -> Result<Option<Self>> {
+        let Some(stream) = input.format_ctx.streams().best(ffn::media::Type::Audio) else {
+            return Ok(None);
+        };
 
         let stream_index = stream.index();
 
@@ -104,12 +102,12 @@ impl AudioDecoder {
             frame_size,
         };
 
-        Ok(AudioDecoder { decoder, metadata })
+        Ok(Some(Decoder { decoder, metadata }))
     }
 }
 
-unsafe impl Send for AudioDecoder {}
-unsafe impl Sync for AudioDecoder {}
+unsafe impl Send for Decoder {}
+unsafe impl Sync for Decoder {}
 
 struct ResamplerState {
     parameters: AudioParameters,
@@ -118,7 +116,7 @@ struct ResamplerState {
 }
 
 pub(crate) struct AudioThread {
-    decoder: AudioDecoder,
+    decoder: Decoder,
     state: Arc<DecoderState>,
     audio_rx: PacketReceiver,
     frame_queue: FrameQueue,
@@ -128,7 +126,7 @@ pub(crate) struct AudioThread {
 
 impl AudioThread {
     pub fn new(
-        decoder: AudioDecoder,
+        decoder: Decoder,
         pbs: Arc<DecoderState>,
         audio_rx: PacketReceiver,
         frame_queue: FrameQueue,

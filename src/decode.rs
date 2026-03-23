@@ -3,7 +3,7 @@ pub(crate) mod hw;
 pub(crate) mod read;
 pub(crate) mod video;
 
-use crate::decode::{audio::AudioStream, video::VideoStream};
+use crate::decode::{audio::AudioStream, read::Metadata, video::VideoStream};
 use arc_swap::ArcSwap;
 use atomic_float::AtomicF64;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -22,18 +22,22 @@ pub(crate) enum PlayState {
 }
 
 pub(crate) struct DecoderState {
-    pub(crate) alive: AtomicBool,
-    pub(crate) play_state: AtomicU8,
-    pub(crate) is_eof: AtomicBool,
-    pub(crate) current_pts: AtomicI64,
+    pub metadata: Metadata,
 
-    pub(crate) video_stream: ArcSwap<VideoStream>,
-    pub(crate) audio_stream: ArcSwap<AudioStream>,
+    pub alive: AtomicBool,
+    pub play_state: AtomicU8,
+    pub is_eof: AtomicBool,
+    pub current_pts: AtomicI64,
+
+    pub video_stream: ArcSwap<VideoStream>,
+    pub audio_stream: ArcSwap<AudioStream>,
 }
 
 impl DecoderState {
-    pub fn new(video: VideoStream, audio: AudioStream) -> Self {
+    pub fn new(metadata: Metadata, video: VideoStream, audio: AudioStream) -> Self {
         DecoderState {
+            metadata,
+
             alive: AtomicBool::new(true),
             play_state: AtomicU8::new(PlayState::Playing as u8),
             is_eof: AtomicBool::new(false),
@@ -281,5 +285,11 @@ impl Clock {
         {
             self.set(slave_clock, slave.serial.load(Ordering::Relaxed), None);
         }
+    }
+}
+
+pub(crate) fn sink_thread(state: Arc<DecoderState>, packets: PacketReceiver) {
+    while state.alive.load(Ordering::Relaxed) {
+        packets.receive();
     }
 }
