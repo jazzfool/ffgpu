@@ -10,6 +10,7 @@ fn yuv_to_rgb_matrix(color_space: ffn::color::Space) -> [f32; 9] {
                 | ffn::color::Space::FCC
                 | ffn::color::Space::BT470BG
                 | ffn::color::Space::BT2020CL
+                | ffn::color::Space::BT2020NCL
         ),
         "unsupported video color space {:#?}",
         color_space
@@ -100,7 +101,7 @@ impl PipelineCache {
                     .device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: None,
-                        bind_group_layouts: &[&bg0_layout],
+                        bind_group_layouts: &[Some(&bg0_layout)],
                         immediate_size: 0,
                     });
 

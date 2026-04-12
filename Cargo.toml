@@ -10,7 +10,7 @@ cpal = ["dep:cpal"]
 [dependencies]
 ffmpeg-next = { version = "8.0" }
 thiserror = "2.0"
-wgpu = "28.0"
+wgpu = "29.0"
 winit = "0.29"
 pollster = "0.4"
 env_logger = "0.11"
@@ -29,11 +29,10 @@ windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11", "Win32_Gr
 objc2 = "0.6"
 objc2-core-video = "0.3"
 objc2-metal = "0.3"
-metal = "0.33"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ash = "0.38"
 libc = "0.2"
 
 [dev-dependencies]
-glyphon = "0.10"
+glyphon = { git = "https://github.com/grovesNL/glyphon.git", rev = "28f1cb92e120ab790eca9ecc6aeb0ed8c8336fc0" }

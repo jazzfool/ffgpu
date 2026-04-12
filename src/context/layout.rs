@@ -8,14 +8,40 @@ pub enum PlaneLayout<T> {
     RGB(T),
 }
 
+pub struct PlaneDescriptor {
+    pub width_div: u32,
+    pub height_div: u32,
+    pub channels: u32,
+}
+
 impl<T> PlaneLayout<T> {
-    pub fn as_identity(&self) -> PlaneLayout<()> {
+    pub fn map<U>(&self, mut f: impl FnMut(&T, PlaneDescriptor) -> U) -> PlaneLayout<U> {
+        let pdesc = |width_div, height_div, channels| PlaneDescriptor {
+            width_div,
+            height_div,
+            channels,
+        };
+
         match self {
-            PlaneLayout::PackedYUV420(_) => PlaneLayout::PackedYUV420([(); 2]),
-            PlaneLayout::YUV420(_) => PlaneLayout::YUV420([(); 3]),
-            PlaneLayout::YUV444(_) => PlaneLayout::YUV444([(); 3]),
-            PlaneLayout::RGB(_) => PlaneLayout::RGB(()),
+            PlaneLayout::PackedYUV420([y, uv]) => {
+                PlaneLayout::PackedYUV420([f(y, pdesc(1, 1, 1)), f(uv, pdesc(2, 2, 2))])
+            }
+            PlaneLayout::YUV420([y, u, v]) => PlaneLayout::YUV420([
+                f(y, pdesc(1, 1, 1)),
+                f(u, pdesc(2, 2, 1)),
+                f(v, pdesc(2, 2, 1)),
+            ]),
+            PlaneLayout::YUV444([y, u, v]) => PlaneLayout::YUV444([
+                f(y, pdesc(1, 1, 1)),
+                f(u, pdesc(1, 1, 1)),
+                f(v, pdesc(1, 1, 1)),
+            ]),
+            PlaneLayout::RGB(plane) => PlaneLayout::RGB(f(plane, pdesc(1, 1, 3))),
         }
+    }
+
+    pub fn as_identity(&self) -> PlaneLayout<()> {
+        self.map(|_, _| ())
     }
 }
 
@@ -101,52 +127,25 @@ fn create_texture(
 
 pub fn create_frame_textures(
     device: &wgpu::Device,
-    desc: FrameDescriptor<wgpu::TextureFormat>,
+    planes: PlaneLayout<wgpu::TextureFormat>,
     width: u32,
     height: u32,
     usage: wgpu::TextureUsages,
-) -> Option<FrameDescriptor<wgpu::Texture>> {
-    match (desc.planes, desc.depth) {
-        (PlaneLayout::PackedYUV420([y, uv]), _) => Some(FrameDescriptor {
-            planes: PlaneLayout::PackedYUV420([
-                create_texture(device, width, height, y, usage),
-                create_texture(device, width / 2, height / 2, uv, usage),
-            ]),
-            depth: desc.depth,
-        }),
-        (PlaneLayout::YUV420([y, u, v]), _) => Some(FrameDescriptor {
-            planes: PlaneLayout::YUV420([
-                create_texture(device, width, height, y, usage),
-                create_texture(device, width / 2, height / 2, u, usage),
-                create_texture(device, width / 2, height / 2, v, usage),
-            ]),
-            depth: desc.depth,
-        }),
-        (PlaneLayout::YUV444([y, u, v]), _) => Some(FrameDescriptor {
-            planes: PlaneLayout::YUV444([
-                create_texture(device, width, height, y, usage),
-                create_texture(device, width, height, u, usage),
-                create_texture(device, width, height, v, usage),
-            ]),
-            depth: desc.depth,
-        }),
-        _ => None,
-    }
+) -> PlaneLayout<wgpu::Texture> {
+    planes.map(|format, plane_desc| {
+        create_texture(
+            device,
+            width / plane_desc.width_div,
+            height / plane_desc.height_div,
+            *format,
+            usage,
+        )
+    })
 }
 
 pub fn create_frame_texture_views(
     textures: &PlaneLayout<wgpu::Texture>,
     desc: &wgpu::TextureViewDescriptor,
 ) -> PlaneLayout<wgpu::TextureView> {
-    match textures {
-        PlaneLayout::PackedYUV420([y, uv]) => {
-            PlaneLayout::PackedYUV420([y.create_view(desc), uv.create_view(desc)])
-        }
-        PlaneLayout::YUV420([y, u, v]) | PlaneLayout::YUV444([y, u, v]) => PlaneLayout::YUV420([
-            y.create_view(desc),
-            u.create_view(desc),
-            v.create_view(desc),
-        ]),
-        PlaneLayout::RGB(rgb) => PlaneLayout::RGB(rgb.create_view(desc)),
-    }
+    textures.map(|texture, _| texture.create_view(desc))
 }

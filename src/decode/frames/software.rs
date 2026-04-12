@@ -77,14 +77,16 @@ impl FrameAdapter for SoftwareFrameAdapter {
             let texture_format = layout::av_pixel_texture_format(pixel_format)
                 .ok_or(Error::UnsupportedPixelFormat)?;
 
-            let textures = layout::create_frame_textures(
-                device,
-                texture_format,
-                frame.width as _,
-                frame.height as _,
-                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            )
-            .ok_or(Error::UnsupportedPixelFormat)?;
+            let textures = layout::FrameDescriptor {
+                planes: layout::create_frame_textures(
+                    device,
+                    texture_format.planes,
+                    frame.width as _,
+                    frame.height as _,
+                    wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                ),
+                depth: texture_format.depth,
+            };
 
             let bg0 = pipeline_cache.bind_frame_textures(
                 &layout::FrameDescriptor {

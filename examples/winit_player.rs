@@ -22,9 +22,9 @@ fn main() {
         .unwrap();
     let window = Arc::new(window);
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
-        ..wgpu::InstanceDescriptor::from_env_or_default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle_from_env()
     });
 
     let surface = instance.create_surface(&window).unwrap();
@@ -77,7 +77,7 @@ fn main() {
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[&bg0_layout],
+        bind_group_layouts: &[Some(&bg0_layout)],
         immediate_size: 0,
     });
 
@@ -172,12 +172,6 @@ fn main() {
         .run(move |event, target| match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => target.exit(),
-                WindowEvent::Resized(new_size) => {
-                    config.width = new_size.width.max(1);
-                    config.height = new_size.height.max(1);
-                    surface.configure(&device, &config);
-                    window.request_redraw();
-                }
                 WindowEvent::RedrawRequested => {
                     window.request_redraw();
 
@@ -187,7 +181,17 @@ fn main() {
                         return;
                     }
 
-                    let frame = surface.get_current_texture().unwrap();
+                    let frame = match surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(texture) => texture,
+                        x => {
+                            drop(x);
+                            config.width = window.inner_size().width.max(1);
+                            config.height = window.inner_size().height.max(1);
+                            surface.configure(&device, &config);
+                            window.request_redraw();
+                            return;
+                        }
+                    };
                     let frame_view = frame.texture.create_view(&Default::default());
 
                     let mut encoder = device.create_command_encoder(&Default::default());
